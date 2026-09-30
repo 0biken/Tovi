@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "core/tovi-core",
+    "core/tovi-cli"
+]
+resolver = "2"

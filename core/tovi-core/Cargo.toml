@@ -1,0 +1,27 @@
+[package]
+name = "tovi-core"
+version = "0.1.0"
+edition = "2021"
+description = "Core transfer engine and networking for TOVI"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.37", features = ["full"] }
+
+# Networking & Transport (Phase 1 QUIC)
+quinn = "0.11"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] } # Match quinn's ring provider; avoids pulling in aws-lc-rs
+rcgen = "0.13" # Ephemeral cert generation for P2P QUIC
+
+# Identity & Crypto
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+sha2 = "0.10" # For file hashing
+
+# Discovery (Phase 1 mDNS)
+mdns-sd = "0.11"
+
+# Utilities
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"

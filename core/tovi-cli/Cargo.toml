@@ -1,0 +1,12 @@
+[package]
+name = "tovi-cli"
+version = "0.1.0"
+edition = "2021"
+description = "Headless CLI spike for TOVI"
+
+[dependencies]
+tovi-core = { path = "../tovi-core" }
+tokio = { version = "1.37", features = ["full", "tracing"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+anyhow = "1.0"
