@@ -224,23 +224,19 @@ streaming
 
 # 9. QR Bootstrap Protocol
 
-QR payload should be short-lived.
+QR payload should be short-lived: **60 seconds**, enforced by the desktop.
 
-Example conceptual payload:
+The QR encodes `tovi://pair/<base64url(CBOR)>` with:
 
-```json
-{
-  "v": 1,
-  "device": "device-id",
-  "session": "temporary-session-id",
-  "endpoint": "192.168.1.12:48210",
-  "public_key": "...",
-  "nonce": "...",
-  "expires": 30
-}
+```text
+v   payload version (1)
+k   desktop Ed25519 public key
+s   one-time pairing secret (32 bytes)
+x   expiry, absolute Unix seconds
+e   candidate endpoints (address + port), several
 ```
 
-The QR must not contain permanent secrets.
+The QR must not contain permanent secrets. Full specification: `decisions.md` D3.
 
 ---
 
@@ -249,24 +245,23 @@ The QR must not contain permanent secrets.
 Recommended lifecycle:
 
 ```text
-Desktop generates ephemeral session
-        ↓
-Session expires
+Desktop generates ephemeral session (secret + 60 s expiry)
         ↓
 QR generated
         ↓
 Phone scans
         ↓
-Phone validates expiry
+Phone connects, pins desktop key from QR
         ↓
-Phone connects
+Phone proves secret, bound to this TLS session
         ↓
-Crypto handshake
+Desktop user approves (Allow / Cancel)
         ↓
 QR session invalidated
 ```
 
-This reduces replay risk.
+The desktop enforces expiry; the phone's check is only for an early error message. Binding the
+secret to the TLS session prevents replay and relay. Full handshake: `decisions.md` D2.
 
 ---
 
@@ -280,19 +275,15 @@ Recommended architecture:
 
 ### Key agreement
 
-**X25519**
+**X25519**, performed by the TLS 1.3 handshake inside QUIC. No separate key-agreement layer.
 
 ### Transport encryption
 
-**TLS 1.3 through QUIC**
+**TLS 1.3 through QUIC**, with certificates pinned to each device's Ed25519 key (`decisions.md` D1)
 
 ### File integrity
 
-**SHA-256**
-
-Potential alternative:
-
-BLAKE3 for performance-sensitive local hashing, while retaining SHA-256 compatibility where necessary.
+**BLAKE3**, per chunk and for the whole file (`decisions.md` D5)
 
 ---
 
@@ -456,10 +447,8 @@ Conceptually:
 ```text
 getTargetDevice()
 
-if local_lan_reachable:
+if local_lan_reachable:          # endpoint from mDNS, or from a scanned QR
     use LAN
-else if qr_bootstrap_available:
-    attempt QR endpoint
 else if direct_p2p_supported:
     use best available P2P
 else if remote_mode_enabled:
@@ -529,7 +518,7 @@ file_id
 file_size
 chunk_size
 chunk_count
-sha256
+blake3
 ```
 
 Each chunk:
@@ -688,7 +677,7 @@ mime_type
 status
 source_path
 destination_path
-sha256
+blake3
 created_at
 completed_at
 ```
@@ -1283,6 +1272,8 @@ Focus on:
 ---
 
 ## Sprint 5 — Windows
+
+Windows is now part of the first milestone (`decisions.md` D7). This sprint covers the remaining OS integration only.
 
 Reuse core.
 
