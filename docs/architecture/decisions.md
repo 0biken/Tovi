@@ -40,15 +40,16 @@ derived from the public key, so a device's ID can't be claimed without its priva
 3. Phone connects over QUIC and pins the desktop key from the QR (D1). Anyone intercepting the
    connection cannot present that key, so the phone knows it reached the right desktop.
 4. Phone sends `PAIR` containing
-   `HMAC(key = secret, "TOVI-PAIR-v1" ‖ exporter ‖ phone_pubkey ‖ desktop_pubkey)`, where
-   `exporter` is 32 bytes of TLS keying material exported from this connection
-   (label `EXPORTER-TOVI-PAIR-v1`). The desktop recomputes and compares in constant time.
+   `MAC(key = secret, "TOVI-PAIR-v1" ‖ exporter ‖ phone_pubkey ‖ desktop_pubkey)`, where
+   `MAC` is BLAKE3 in keyed mode (`blake3::keyed_hash`, consistent with D5) and `exporter` is
+   32 bytes of TLS keying material exported from this connection (label
+   `EXPORTER-TOVI-PAIR-v1`). The desktop recomputes and compares in constant time.
 5. On a match, the desktop shows **Allow / Cancel** with the phone's name. Only on Allow are the
    keys stored as trusted, on both sides.
 6. The session is invalidated on success, on expiry, and after 3 failed attempts.
 
 **Why** — The exporter value is unique to this TLS connection, so a valid `PAIR` message can't be
-replayed on, or relayed through, another connection. The phone's own key is inside the HMAC, so
+replayed on, or relayed through, another connection. The phone's own key is inside the MAC, so
 the desktop knows which key it is trusting. Uses only primitives rustls/quinn already provide
 (`Connection::export_keying_material`).
 

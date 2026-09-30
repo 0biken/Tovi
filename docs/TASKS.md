@@ -23,7 +23,7 @@ Decisions are recorded in [`architecture/decisions.md`](architecture/decisions.m
 ## 1. Decisions & doc fixes
 
 - [x] **(D1)** Certificate verification: pin peer Ed25519 key, mutual TLS, handshake signature always verified
-- [x] **(D2)** Pairing: key pin + HMAC over TLS exporter, then desktop approval
+- [x] **(D2)** Pairing: key pin + BLAKE3 keyed MAC over TLS exporter, then desktop approval
 - [x] **(D3)** QR payload: `tovi://pair/<base64url(CBOR)>`, absolute 60 s expiry, multiple endpoints
 - [x] **(D4)** Mobile bridge: UniFFI, via a thin `tovi-ffi` crate
 - [x] **(D5)** Hash: BLAKE3. Chunk size: 8 MiB provisional (benchmark in §10)
@@ -48,12 +48,13 @@ Decisions are recorded in [`architecture/decisions.md`](architecture/decisions.m
 
 - [ ] `Transport` trait (connect / accept / open stream) — transport-agnostic per §2
 - [ ] QUIC LAN implementation with `quinn` (server + client endpoints, mutual TLS)
+- [ ] Server rejects any client key that is neither trusted nor in an active pairing session (the TLS verifier accepts any Ed25519 key; trust is enforced here)
 - [ ] Bind to all interfaces; enumerate candidate addresses (skip Hyper-V/WSL/Docker/VPN where possible)
 - [ ] Connection timeouts, keep-alive, graceful close
 
 ## 4. Core — discovery (`discovery`)
 
-- [ ] `Discovery` trait (advertise / browse / events)
+- [ ] `Discovery` trait (advertise / browse / events); call `ServiceDaemon::shutdown()` on drop
 - [ ] Desktop implementation using `mdns-sd`, service `_tovi._udp.local`
 - [ ] TXT record: protocol version, port, opaque ID (not the human device name)
 - [ ] Bounded browse windows (battery, §38)
