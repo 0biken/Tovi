@@ -37,11 +37,12 @@ Decisions are recorded in [`architecture/decisions.md`](architecture/decisions.m
 
 ## 2. Core — identity (`identity`)
 
-- [ ] Generate / load Ed25519 device keypair
-- [ ] Derive `device_id` from public key
-- [ ] Build self-signed QUIC certificate from the identity key (`rcgen`)
-- [ ] Custom rustls `ServerCertVerifier` / `ClientCertVerifier` that pin known peer keys
-- [ ] `KeyStore` trait for OS keychains (file-backed dev implementation first)
+- [x] Generate / load Ed25519 device keypair
+- [x] Derive `device_id` from public key
+- [x] Build self-signed QUIC certificate from the identity key (`rcgen`)
+- [x] Custom rustls `ServerCertVerifier` / `ClientCertVerifier` that pin known peer keys
+- [x] `KeyStore` trait + file-backed dev implementation
+- [ ] OS keychain `KeyStore` implementations (Windows DPAPI, macOS Keychain first per D7)
 
 ## 3. Core — transport (`transport`)
 
