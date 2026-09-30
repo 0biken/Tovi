@@ -602,15 +602,16 @@ Local mode must continue to work when internet connectivity is unavailable.
 - pairing management
 - notifications
 - transfer retry
-- resumable transfers
 - hotspot/direct-mode guidance
+
+Resumable transfers are **P0**, not P1: they are MVP release criterion #7 and one of the four
+spike capabilities.
 
 ---
 
 # 14. P2 Features
 
 - iOS
-- Linux
 - Wi-Fi Direct
 - Wi-Fi Aware
 - remote transfer
@@ -850,7 +851,7 @@ Each device generates a long-term cryptographic identity.
 Recommended:
 
 - Ed25519 identity key
-- X25519 ephemeral key agreement
+- X25519 ephemeral key agreement, performed by the TLS 1.3 handshake
 - TLS 1.3 / QUIC transport
 
 ---
@@ -891,9 +892,9 @@ Every transferred file should be verified using a cryptographic hash.
 
 Recommended:
 
-**SHA-256**
+**BLAKE3**
 
-For extremely large transfers, chunk-level hashes may also be used.
+Each chunk is also hashed, so a corrupted chunk is re-sent instead of the whole file.
 
 ---
 

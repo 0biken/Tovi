@@ -1,9 +1,11 @@
 # TOVI — Task List (draft)
 
-Target for the first milestone (Tech doc §54): **a 2 GB file moves Android → macOS over a
+Target for the first milestone (Tech doc §54, amended by D7): **a 2 GB file moves Android → Windows and macOS over a
 home LAN, paired by QR scan, with no internet dependency, and survives a Wi-Fi drop.**
 
 Legend: `[ ]` open · `[x]` done · **(D)** = decision needed before dependent work starts
+
+Decisions are recorded in [`architecture/decisions.md`](architecture/decisions.md) (D1–D7).
 
 ---
 
@@ -20,37 +22,39 @@ Legend: `[ ]` open · `[x]` done · **(D)** = decision needed before dependent w
 
 ## 1. Decisions & doc fixes
 
-- [ ] **(D)** Certificate verification model: pin peer Ed25519 key (custom rustls verifiers on both sides); never "accept any cert"
-- [ ] **(D)** QR pairing handshake: how the QR secret is bound to the TLS session (TLS exporter + HMAC, or a PAKE such as SPAKE2)
-- [ ] **(D)** QR payload format: absolute expiry, multiple candidate endpoints, cert fingerprint, compact encoding (CBOR/base45 vs JSON)
-- [ ] **(D)** FFI strategy for Android/iOS (UniFFI recommended)
-- [ ] **(D)** Chunk size (benchmark 4 / 8 / 16 MiB) and hash choice (SHA-256 vs BLAKE3)
-- [ ] **(D)** Wire encoding for TVP/1 messages (e.g. length-prefixed postcard/CBOR)
-- [ ] **(D)** Spike desktop target: macOS (per Tech doc) vs Windows (current dev machine)
-- [ ] Reconcile PRD vs Tech doc: QR lifetime (60s vs 30s), resume priority (P0 vs P1), Linux phase (1.5 vs P2), Windows timing (MVP vs Sprint 5)
-- [ ] Fix QR lifecycle ordering in Tech doc §10; drop QR from transport list in §18
-- [ ] Clarify X25519 in §11 (TLS 1.3 already provides it) or state its separate purpose
+- [x] **(D1)** Certificate verification: pin peer Ed25519 key, mutual TLS, handshake signature always verified
+- [x] **(D2)** Pairing: key pin + BLAKE3 keyed MAC over TLS exporter, then desktop approval
+- [x] **(D3)** QR payload: `tovi://pair/<base64url(CBOR)>`, absolute 60 s expiry, multiple endpoints
+- [x] **(D4)** Mobile bridge: UniFFI, via a thin `tovi-ffi` crate
+- [x] **(D5)** Hash: BLAKE3. Chunk size: 8 MiB provisional (benchmark in §10)
+- [x] **(D6)** Wire encoding: length-prefixed CBOR (`ciborium`), 64 KiB control-frame cap, raw chunk bytes
+- [x] **(D7)** Spike desktop target: Windows and macOS together
+- [x] Reconcile PRD vs Tech doc: QR lifetime 60 s, resume P0, Linux phase 1.5, Windows in first milestone
+- [x] Fix QR lifecycle ordering in Tech doc §10; drop QR from transport list in §18
+- [x] Clarify X25519 in §11 (performed by TLS 1.3; no separate layer)
 - [ ] Write `docs/protocol/TVP-1.md` (message types, framing, versioning, error codes)
 - [ ] Write `docs/security/threat-model.md` expanding Tech doc §43
 
 ## 2. Core — identity (`identity`)
 
-- [ ] Generate / load Ed25519 device keypair
-- [ ] Derive `device_id` from public key
-- [ ] Build self-signed QUIC certificate from the identity key (`rcgen`)
-- [ ] Custom rustls `ServerCertVerifier` / `ClientCertVerifier` that pin known peer keys
-- [ ] `KeyStore` trait for OS keychains (file-backed dev implementation first)
+- [x] Generate / load Ed25519 device keypair
+- [x] Derive `device_id` from public key
+- [x] Build self-signed QUIC certificate from the identity key (`rcgen`)
+- [x] Custom rustls `ServerCertVerifier` / `ClientCertVerifier` that pin known peer keys
+- [x] `KeyStore` trait + file-backed dev implementation
+- [ ] OS keychain `KeyStore` implementations (Windows DPAPI, macOS Keychain first per D7)
 
 ## 3. Core — transport (`transport`)
 
 - [ ] `Transport` trait (connect / accept / open stream) — transport-agnostic per §2
 - [ ] QUIC LAN implementation with `quinn` (server + client endpoints, mutual TLS)
+- [ ] Server rejects any client key that is neither trusted nor in an active pairing session (the TLS verifier accepts any Ed25519 key; trust is enforced here)
 - [ ] Bind to all interfaces; enumerate candidate addresses (skip Hyper-V/WSL/Docker/VPN where possible)
 - [ ] Connection timeouts, keep-alive, graceful close
 
 ## 4. Core — discovery (`discovery`)
 
-- [ ] `Discovery` trait (advertise / browse / events)
+- [ ] `Discovery` trait (advertise / browse / events); call `ServiceDaemon::shutdown()` on drop
 - [ ] Desktop implementation using `mdns-sd`, service `_tovi._udp.local`
 - [ ] TXT record: protocol version, port, opaque ID (not the human device name)
 - [ ] Bounded browse windows (battery, §38)
@@ -74,7 +78,7 @@ Legend: `[ ]` open · `[x]` done · **(D)** = decision needed before dependent w
 ## 7. Core — transfer engine (`transfer`)
 
 - [ ] Streaming chunk reader (no full-file buffering)
-- [ ] Per-chunk hash + whole-file SHA-256
+- [ ] Per-chunk BLAKE3 hash + whole-file BLAKE3 (replace `sha2` dependency)
 - [ ] Receiver writes to `*.tovi.part`, verifies, then atomic rename
 - [ ] Filename sanitisation: strip separators and `..`, Windows reserved names, length limits
 - [ ] Duplicate filename handling (`name (1).ext`)
@@ -116,7 +120,7 @@ Legend: `[ ]` open · `[x]` done · **(D)** = decision needed before dependent w
 - [ ] Share-sheet intent ("Share → TOVI")
 - [ ] Foreground service for active transfers; notifications
 - [ ] Permissions per API level (`NEARBY_WIFI_DEVICES` on 13+)
-- [ ] Android → macOS 2 GB transfer (the milestone)
+- [ ] Android → Windows and Android → macOS 2 GB transfer (the milestone)
 
 ## 12. Desktop app (Sprint 2)
 
@@ -133,7 +137,7 @@ Legend: `[ ]` open · `[x]` done · **(D)** = decision needed before dependent w
 - [ ] Adversarial network tests (§41): sleep/wake, IP change, VPN, firewall, client isolation
 - [ ] Security tests (§42): MITM, QR replay/expiry, impersonation, path traversal, revoked device
 - [ ] External security review (MVP release criterion #9)
-- [ ] Windows firewall rule / first-run prompt handling
+- [ ] Windows firewall rule / first-run prompt handling (needed for milestone, D7)
 
 ## 14. Later (post-MVP)
 
