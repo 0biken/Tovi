@@ -13,10 +13,10 @@ Legend: `[ ]` open · `[x]` done · **(D)** = decision needed before dependent w
 - [x] `git init`, `.gitignore`
 - [x] Make `tovi-core` structurally compilable (module stubs, single rustls crypto provider)
 - [ ] Install Rust toolchain (rustup, stable) and confirm `cargo check` / `cargo clippy` pass
-- [ ] Initial commit; create remote repository
-- [ ] Root Cargo workspace (`Cargo.toml` at repo root, `core/tovi-core` as member)
-- [ ] CI: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test` on Windows/macOS/Linux
-- [ ] Split `tovi-core` into a library + a separate `tovi-cli` spike binary
+- [x] Initial commit; create remote repository (github.com/0biken/Tovi)
+- [x] Root Cargo workspace (`Cargo.toml` at repo root, `core/tovi-core` as member)
+- [ ] CI: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test` on Windows/macOS/Linux — workflow written, not yet green
+- [x] Split `tovi-core` into a library + a separate `tovi-cli` spike binary (`core/tovi-cli`)
 
 ## 1. Decisions & doc fixes
 
