@@ -12,10 +12,10 @@ Legend: `[ ]` open · `[x]` done · **(D)** = decision needed before dependent w
 - [x] Remove duplicate docs; move PRD / Tech doc into `docs/`
 - [x] `git init`, `.gitignore`
 - [x] Make `tovi-core` structurally compilable (module stubs, single rustls crypto provider)
-- [ ] Install Rust toolchain (rustup, stable) and confirm `cargo check` / `cargo clippy` pass
+- [x] Install Rust toolchain (rustup, stable 1.98.1 + MSVC Build Tools); `cargo fmt` / `clippy` / `test` pass locally
 - [x] Initial commit; create remote repository (github.com/0biken/Tovi)
 - [x] Root Cargo workspace (`Cargo.toml` at repo root, `core/tovi-core` as member)
-- [ ] CI: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test` on Windows/macOS/Linux — workflow written, not yet green
+- [x] CI: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test` on Windows/macOS/Linux (green on PR #1)
 - [x] Split `tovi-core` into a library + a separate `tovi-cli` spike binary (`core/tovi-cli`)
 
 ## 1. Decisions & doc fixes
