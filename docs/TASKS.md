@@ -66,7 +66,7 @@ Decisions are recorded in [`architecture/decisions.md`](architecture/decisions.m
 
 - [x] Ephemeral pairing session: 32-byte secret, absolute 60 s expiry, single use, closed after 3 failed attempts
 - [x] QR payload encode/decode (`tovi://pair/<base64url(CBOR)>`, ~150 chars)
-- [ ] Terminal QR render for the CLI spike (§10)
+- [x] Terminal QR render for the CLI spike (§10)
 - [x] Pairing handshake over QUIC, bound to TLS session (BLAKE3 keyed MAC over TLS exporter + both keys)
 - [x] Desktop-side approval step (Allow / Cancel) required even with valid QR
 - [x] Trusted-device store (`TrustStore` trait, in-memory)
@@ -110,7 +110,10 @@ Decisions are recorded in [`architecture/decisions.md`](architecture/decisions.m
 
 ## 10. Spike validation (Tech doc §49)
 
-- [ ] CLI: `tovi-cli listen` / `tovi-cli pair` / `tovi-cli send <file> <device>`
+- [x] CLI: `tovi-cli id` / `listen` (QR + approval prompt) / `pair <link>`; persistent identity via `--data-dir`
+- [x] Live pairing between two CLI processes over the Wi-Fi address; reused link refused with a clear message
+- [ ] Pair two physical machines over home Wi-Fi with the CLI
+- [ ] CLI: `tovi-cli send <file> <device>` (needs §7)
 - [ ] Desktop ↔ desktop 2 GB transfer over LAN, checksum verified
 - [ ] Transfer resumes after Wi-Fi toggle mid-transfer
 - [ ] QR pairing works with mDNS blocked
