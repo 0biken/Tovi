@@ -25,6 +25,8 @@ const MAX_CAPABILITY_LEN: usize = 32;
 const MAX_REASON_LEN: usize = 256;
 /// Longest file name accepted on the wire, in bytes, before sanitising
 const MAX_FILE_NAME_LEN: usize = 1024;
+/// Most `have` ranges in one `TRANSFER_RESPONSE`; keeps it well inside a frame
+pub const MAX_HAVE_RANGES: usize = 2048;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "SCREAMING_SNAKE_CASE")]
@@ -65,6 +67,10 @@ pub struct TransferResponse {
     pub transfer_id: [u8; 16],
     pub accepted: bool,
     pub reason: Option<String>,
+    /// When resuming: chunks the receiver already holds, as `[start, end)`
+    /// index ranges. A hint: the sender re-sends anything not listed.
+    #[serde(default)]
+    pub have: Vec<[u64; 2]>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -151,8 +157,15 @@ impl Message {
     fn validate(&self) -> Result<()> {
         match self {
             Message::Hello(hello) => hello.validate(),
+            Message::TransferResponse(TransferResponse { reason, have, .. }) => {
+                ensure!(have.len() <= MAX_HAVE_RANGES, "too many chunk ranges");
+                ensure!(
+                    have.iter().all(|[start, end]| start < end),
+                    "empty chunk range"
+                );
+                validate_reason(reason)
+            }
             Message::PairResult(PairResult { reason, .. })
-            | Message::TransferResponse(TransferResponse { reason, .. })
             | Message::TransferResult(TransferResult { reason, .. }) => validate_reason(reason),
             Message::TransferOffer(offer) => {
                 ensure!(

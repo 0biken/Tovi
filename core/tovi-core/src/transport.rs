@@ -267,6 +267,12 @@ impl PeerConnection {
         self.inner.closed().await
     }
 
+    /// Whether the connection has ended, for any reason (either side closed
+    /// it, or it timed out because the network went away)
+    pub fn is_closed(&self) -> bool {
+        self.inner.close_reason().is_some()
+    }
+
     /// Whether the other side closed this connection because it does not
     /// authorize us ([`CLOSE_UNAUTHORIZED`])
     pub fn was_refused(&self) -> bool {
