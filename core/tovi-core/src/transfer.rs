@@ -54,6 +54,9 @@ pub const MAX_CHUNK_SIZE: u32 = 16 * 1024 * 1024;
 pub const PARALLEL_CHUNKS: usize = 4;
 /// How long [`send_with_resume`] keeps trying to reconnect after a drop
 pub const RECONNECT_WINDOW: Duration = Duration::from_secs(120);
+/// How long an [`Inbox`] remembers finished transfers (well beyond
+/// [`RECONNECT_WINDOW`])
+const COMPLETED_MEMORY: Duration = Duration::from_secs(600);
 
 const PART_SUFFIX: &str = ".tovi.part";
 const STATE_SUFFIX: &str = ".tovi.state";
@@ -377,6 +380,19 @@ pub struct Inbox {
     dir: PathBuf,
     active: Mutex<HashMap<TransferId, ActiveTransfer>>,
     next_generation: AtomicU64,
+    /// Recently finished transfers, so a sender that lost the connection
+    /// before hearing "saved" is confirmed instead of sending a second copy
+    completed: Mutex<HashMap<TransferId, Completed>>,
+}
+
+#[derive(Clone)]
+struct Completed {
+    sender: DeviceId,
+    file_size: u64,
+    chunk_size: u32,
+    file_hash: blake3::Hash,
+    path: PathBuf,
+    at: Instant,
 }
 
 struct ActiveTransfer {
@@ -519,6 +535,7 @@ impl Inbox {
             dir: dir.into(),
             active: Mutex::new(HashMap::new()),
             next_generation: AtomicU64::new(0),
+            completed: Mutex::new(HashMap::new()),
         }
     }
 
@@ -549,6 +566,11 @@ impl Inbox {
         };
         let id = offer.transfer_id;
 
+        if let Some(done) = self.already_received(&offer, conn.peer_id()) {
+            return confirm_completed(&mut control_send, &mut control_recv, &offer, done)
+                .await
+                .map(Some);
+        }
         if let Err(e) = check_offer(&offer, &self.dir) {
             refuse(&mut control_send, id, &e.to_string()).await?;
             return Err(e.context("refused transfer offer"));
@@ -595,6 +617,7 @@ impl Inbox {
         let outcome = received.and_then(|file_hash| {
             let path = finalize(&partial.part_path, &self.dir, &name)?;
             let _ = fs::remove_file(&partial.state_path);
+            self.remember_completed(id, conn.peer_id(), &offer, file_hash, &path);
             Ok(ReceivedFile {
                 path,
                 size: offer.file_size,
@@ -619,6 +642,41 @@ impl Inbox {
         // Best effort: the sender may already be gone
         let _ = protocol::finish_with(&mut control_send, &Message::TransferResult(result)).await;
         outcome.map(Some)
+    }
+
+    /// A transfer this inbox already saved, re-offered by the same sender
+    fn already_received(&self, offer: &TransferOffer, sender: &DeviceId) -> Option<Completed> {
+        let mut completed = self.completed.lock().unwrap();
+        completed.retain(|_, c| c.at.elapsed() < COMPLETED_MEMORY);
+        completed
+            .get(&offer.transfer_id)
+            .filter(|c| {
+                c.sender == *sender
+                    && c.file_size == offer.file_size
+                    && c.chunk_size == offer.chunk_size
+            })
+            .cloned()
+    }
+
+    fn remember_completed(
+        &self,
+        id: TransferId,
+        sender: &DeviceId,
+        offer: &TransferOffer,
+        file_hash: blake3::Hash,
+        path: &Path,
+    ) {
+        self.completed.lock().unwrap().insert(
+            id,
+            Completed {
+                sender: *sender,
+                file_size: offer.file_size,
+                chunk_size: offer.chunk_size,
+                file_hash,
+                path: path.to_path_buf(),
+                at: Instant::now(),
+            },
+        );
     }
 
     /// Register `id` as active on a new connection, signalling any earlier
@@ -674,6 +732,53 @@ fn check_offer(offer: &TransferOffer, receive_dir: &Path) -> Result<()> {
         available / 1_000_000
     );
     Ok(())
+}
+
+/// Answer a re-offer of a transfer that was already saved: claim every chunk,
+/// check the sender's whole-file hash against the saved file, and confirm
+async fn confirm_completed(
+    control_send: &mut SendStream,
+    control_recv: &mut RecvStream,
+    offer: &TransferOffer,
+    done: Completed,
+) -> Result<ReceivedFile> {
+    let id = offer.transfer_id;
+    let count = chunk_count(offer.file_size, offer.chunk_size);
+    let accept = Message::TransferResponse(TransferResponse {
+        transfer_id: id,
+        accepted: true,
+        reason: None,
+        have: if count == 0 {
+            Vec::new()
+        } else {
+            vec![[0, count]]
+        },
+    });
+    protocol::write_message(control_send, &accept).await?;
+    let claimed = match protocol::read_message(control_recv).await? {
+        Message::TransferComplete(c) if c.transfer_id == id => {
+            blake3::Hash::from_bytes(c.file_hash)
+        }
+        other => bail!("expected TRANSFER_COMPLETE, got {other:?}"),
+    };
+
+    let matches = claimed == done.file_hash;
+    let result = TransferResult {
+        transfer_id: id,
+        ok: matches,
+        reason: (!matches).then(|| "does not match the file already received".into()),
+    };
+    let _ = protocol::finish_with(control_send, &Message::TransferResult(result)).await;
+    ensure!(
+        matches,
+        "re-offered transfer does not match the file already received"
+    );
+    Ok(ReceivedFile {
+        path: done.path,
+        size: offer.file_size,
+        file_hash: done.file_hash,
+        resumed_bytes: offer.file_size,
+    })
 }
 
 async fn refuse(send: &mut SendStream, id: TransferId, reason: &str) -> Result<()> {
@@ -1126,6 +1231,26 @@ mod tests {
         fs::remove_dir_all(inbox).unwrap();
     }
 
+    /// Send chunks `indices` of `data` by hand, as part of transfer `id`
+    async fn send_chunks_raw(
+        conn: &PeerConnection,
+        id: TransferId,
+        data: &[u8],
+        indices: std::ops::Range<u64>,
+    ) {
+        let size = MIN_CHUNK_SIZE as usize;
+        for index in indices {
+            let start = index as usize * size;
+            let chunk = &data[start..(start + size).min(data.len())];
+            let header = ChunkHeader {
+                transfer_id: id,
+                index,
+                hash: *blake3::hash(chunk).as_bytes(),
+            };
+            send_chunk(conn, &header, chunk).await.unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn transfer_resumes_after_connection_drop() {
         let link = link().await;
@@ -1134,64 +1259,76 @@ mod tests {
         let data = random_bytes(MIN_CHUNK_SIZE as usize * 20 + 99); // 21 chunks
         let source = outbox.join("holiday.mov");
         fs::write(&source, &data).unwrap();
+        let options = SendOptions {
+            chunk_size: MIN_CHUNK_SIZE,
+        };
+        let transfer = OutgoingTransfer::new(&source, options).unwrap();
+        let five_chunks = u64::from(MIN_CHUNK_SIZE) * 5;
 
-        // First attempt: the receiver drops the connection after a few chunks
-        let dropper = link.receiver.clone();
-        let first_inbox = Arc::new(Inbox::new(&inbox));
+        // First attempt: exactly chunks 0-4 arrive, then the connection drops.
+        // (Driven by hand: on a fast loopback a real sender could get every
+        // chunk into the receiver's buffers before any drop takes effect.)
+        let got_five = Arc::new(tokio::sync::Notify::new());
         let first = {
+            let inbox = Inbox::new(&inbox);
             let conn = link.receiver.clone();
-            let inbox = first_inbox.clone();
+            let signal = got_five.clone();
             tokio::spawn(async move {
                 inbox
                     .receive_next(
                         &conn,
                         |_| async { true },
                         |p| {
-                            if p.done >= u64::from(MIN_CHUNK_SIZE) * 5 {
-                                dropper.close();
+                            if p.done >= five_chunks {
+                                signal.notify_one();
                             }
                         },
                     )
                     .await
             })
         };
+        let (_control, _control_recv, response) = offer_raw(
+            &link.sender,
+            transfer.transfer_id,
+            "holiday.mov",
+            data.len() as u64,
+            MIN_CHUNK_SIZE,
+        )
+        .await;
+        assert!(response.accepted && response.have.is_empty());
+        send_chunks_raw(&link.sender, transfer.transfer_id, &data, 0..5).await;
+        got_five.notified().await;
+        link.sender.close();
+        let first_result = first.await.unwrap();
+        assert!(
+            first_result.is_err(),
+            "first attempt should end with the drop: {first_result:?}"
+        );
 
-        // Second attempt arrives on a new connection, handled by a fresh Inbox,
-        // as if the receiving app had restarted
+        // Second attempt: send_with_resume finds the connection closed,
+        // reconnects, and resumes. A fresh Inbox handles it, as if the
+        // receiving app had restarted, so the state must come from disk.
         let addr = link.receiver_endpoint.local_addr().unwrap();
         let receiver_endpoint = link.receiver_endpoint;
         let second_inbox = inbox.clone();
         let second = tokio::spawn(async move {
             let conn = receiver_endpoint.accept().await.unwrap().unwrap();
-            let resumed_at = Mutex::new(None);
             let result = Inbox::new(&second_inbox)
-                .receive_next(
-                    &conn,
-                    |_| async { true },
-                    |p| {
-                        resumed_at.lock().unwrap().get_or_insert(p.done);
-                    },
-                )
+                .receive_next(&conn, |_| async { true }, |_| {})
                 .await;
-            let resumed_at = *resumed_at.lock().unwrap();
-            (result, resumed_at, receiver_endpoint)
+            (result, receiver_endpoint)
         });
-
-        let transfer = OutgoingTransfer::new(
-            &source,
-            SendOptions {
-                chunk_size: MIN_CHUNK_SIZE,
-            },
-        )
-        .unwrap();
         let drops = AtomicU64::new(0);
+        let first_progress = Mutex::new(None);
         let (_conn, hash) = send_with_resume(
             &link.sender_endpoint,
             &[addr],
             &link.receiver_key,
             link.sender.clone(),
             &transfer,
-            |_| {},
+            |p| {
+                first_progress.lock().unwrap().get_or_insert(p.done);
+            },
             |_| {
                 drops.fetch_add(1, Ordering::Relaxed);
             },
@@ -1199,19 +1336,79 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(
-            first.await.unwrap().is_err(),
-            "first attempt should end with the drop"
-        );
-        let (result, resumed_at, _endpoint) = second.await.unwrap();
+        let (result, _endpoint) = second.await.unwrap();
         let received = result.unwrap().unwrap();
         assert_eq!(drops.load(Ordering::Relaxed), 1);
         assert_eq!(received.file_hash, hash);
-        assert!(received.resumed_bytes >= u64::from(MIN_CHUNK_SIZE) * 5);
-        assert_eq!(resumed_at, Some(received.resumed_bytes));
+        assert_eq!(received.resumed_bytes, five_chunks);
+        assert_eq!(*first_progress.lock().unwrap(), Some(five_chunks));
         assert_eq!(fs::read(&received.path).unwrap(), data);
         assert_eq!(files_in(&inbox), vec!["holiday.mov"]);
         fs::remove_dir_all(inbox).unwrap();
+        fs::remove_dir_all(outbox).unwrap();
+    }
+
+    #[tokio::test]
+    async fn finished_transfer_is_confirmed_not_received_twice() {
+        // The receiver saved the file, but the sender lost the connection
+        // before hearing so; its retry must not create "name (1).ext"
+        let link = link().await;
+        let inbox = Arc::new(Inbox::new(temp_dir()));
+        let outbox = temp_dir();
+        let data = random_bytes(MIN_CHUNK_SIZE as usize * 3 + 5);
+        let source = outbox.join("song.flac");
+        fs::write(&source, &data).unwrap();
+        let options = SendOptions {
+            chunk_size: MIN_CHUNK_SIZE,
+        };
+        let transfer = OutgoingTransfer::new(&source, options).unwrap();
+        let id = transfer.transfer_id;
+
+        // First attempt completes on the receiver; the sender never reads the result
+        let first = spawn_receive(inbox.clone(), link.receiver.clone(), true);
+        let (mut control, control_recv, _) = offer_raw(
+            &link.sender,
+            id,
+            "song.flac",
+            data.len() as u64,
+            MIN_CHUNK_SIZE,
+        )
+        .await;
+        send_chunks_raw(&link.sender, id, &data, 0..4).await;
+        let complete = TransferComplete {
+            transfer_id: id,
+            file_hash: *blake3::hash(&data).as_bytes(),
+        };
+        protocol::write_message(&mut control, &Message::TransferComplete(complete))
+            .await
+            .unwrap();
+        control.finish().unwrap();
+        drop(control_recv);
+        let saved = first.await.unwrap().unwrap().unwrap();
+
+        // The sender retries the same transfer on a new connection
+        let addr = link.receiver_endpoint.local_addr().unwrap();
+        let (retry, retry_receiver) = tokio::join!(
+            link.sender_endpoint.connect(addr, &link.receiver_key),
+            link.receiver_endpoint.accept()
+        );
+        let confirming = spawn_receive(inbox.clone(), retry_receiver.unwrap().unwrap(), true);
+        let first_progress = Mutex::new(None);
+        let hash = transfer
+            .send(&retry.unwrap(), |p| {
+                first_progress.lock().unwrap().get_or_insert(p.done);
+            })
+            .await
+            .unwrap();
+        let confirmed = confirming.await.unwrap().unwrap().unwrap();
+
+        assert_eq!(hash, saved.file_hash);
+        assert_eq!(confirmed.path, saved.path);
+        assert_eq!(confirmed.resumed_bytes, data.len() as u64);
+        // Nothing was re-sent: the sender started at 100%
+        assert_eq!(*first_progress.lock().unwrap(), Some(data.len() as u64));
+        assert_eq!(files_in(inbox.dir()), vec!["song.flac"]);
+        fs::remove_dir_all(inbox.dir()).unwrap();
         fs::remove_dir_all(outbox).unwrap();
     }
 

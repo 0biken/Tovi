@@ -103,6 +103,7 @@ Decisions are recorded in [`architecture/decisions.md`](architecture/decisions.m
 - [x] Auto-reconnect after network drop (`send_with_resume`: reconnects to the QR addresses with backoff for up to 2 minutes)
 - [x] A newer connection takes over a transfer from a stalled one that has not noticed the drop yet
 - [x] Dropped connection keeps partial files; corruption, decline or protocol errors delete them
+- [x] Re-offer of an already-saved transfer is confirmed by its hash, not saved twice (remembered in memory for 10 minutes)
 - [ ] Clean up abandoned partial files (e.g. older than 7 days)
 - [ ] Resume across a sender app restart (persist outgoing transfer IDs)
 
