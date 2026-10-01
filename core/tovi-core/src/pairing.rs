@@ -312,10 +312,7 @@ async fn send_result(send: &mut quinn::SendStream, refusal: Option<&str>) -> Res
         accepted: refusal.is_none(),
         reason: refusal.map(Into::into),
     });
-    protocol::write_message(send, &result).await?;
-    send.finish()?;
-    let _ = send.stopped().await;
-    Ok(())
+    protocol::finish_with(send, &result).await
 }
 
 /// Phone: pair with the desktop described by a scanned QR code. On success

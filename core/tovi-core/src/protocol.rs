@@ -7,6 +7,7 @@
 
 use anyhow::{bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Highest protocol version this build speaks
@@ -22,6 +23,8 @@ const MAX_PLATFORM_LEN: usize = 16;
 const MAX_CAPABILITIES: usize = 32;
 const MAX_CAPABILITY_LEN: usize = 32;
 const MAX_REASON_LEN: usize = 256;
+/// Longest file name accepted on the wire, in bytes, before sanitising
+const MAX_FILE_NAME_LEN: usize = 1024;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "SCREAMING_SNAKE_CASE")]
@@ -33,6 +36,63 @@ pub enum Message {
     Pair(Pair),
     /// Desktop → phone: outcome of pairing, after the user's Allow / Cancel
     PairResult(PairResult),
+    /// Sender → receiver, on a new bidirectional stream: a file to send
+    TransferOffer(TransferOffer),
+    /// Receiver → sender: accept or decline the offer
+    TransferResponse(TransferResponse),
+    /// Sender → receiver, first frame of each chunk's unidirectional stream;
+    /// the raw chunk bytes follow the frame
+    Chunk(ChunkHeader),
+    /// Sender → receiver, after all chunks: hash of the whole file
+    TransferComplete(TransferComplete),
+    /// Receiver → sender: whether the file arrived intact and was saved
+    TransferResult(TransferResult),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct TransferOffer {
+    #[serde(with = "serde_bytes")]
+    pub transfer_id: [u8; 16],
+    /// As named on the sender; the receiver sanitises it before use
+    pub file_name: String,
+    pub file_size: u64,
+    pub chunk_size: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct TransferResponse {
+    #[serde(with = "serde_bytes")]
+    pub transfer_id: [u8; 16],
+    pub accepted: bool,
+    pub reason: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ChunkHeader {
+    #[serde(with = "serde_bytes")]
+    pub transfer_id: [u8; 16],
+    /// Chunk number; its offset and length follow from the offer
+    pub index: u64,
+    /// BLAKE3 hash of this chunk's bytes
+    #[serde(with = "serde_bytes")]
+    pub hash: [u8; 32],
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct TransferComplete {
+    #[serde(with = "serde_bytes")]
+    pub transfer_id: [u8; 16],
+    /// BLAKE3 hash of the whole file
+    #[serde(with = "serde_bytes")]
+    pub file_hash: [u8; 32],
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct TransferResult {
+    #[serde(with = "serde_bytes")]
+    pub transfer_id: [u8; 16],
+    pub ok: bool,
+    pub reason: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -91,17 +151,25 @@ impl Message {
     fn validate(&self) -> Result<()> {
         match self {
             Message::Hello(hello) => hello.validate(),
-            Message::Pair(_) => Ok(()),
-            Message::PairResult(result) => {
-                let too_long = result
-                    .reason
-                    .as_ref()
-                    .is_some_and(|r| r.len() > MAX_REASON_LEN);
-                ensure!(!too_long, "reason too long");
+            Message::PairResult(PairResult { reason, .. })
+            | Message::TransferResponse(TransferResponse { reason, .. })
+            | Message::TransferResult(TransferResult { reason, .. }) => validate_reason(reason),
+            Message::TransferOffer(offer) => {
+                ensure!(
+                    offer.file_name.len() <= MAX_FILE_NAME_LEN,
+                    "file name too long"
+                );
                 Ok(())
             }
+            Message::Pair(_) | Message::Chunk(_) | Message::TransferComplete(_) => Ok(()),
         }
     }
+}
+
+fn validate_reason(reason: &Option<String>) -> Result<()> {
+    let too_long = reason.as_ref().is_some_and(|r| r.len() > MAX_REASON_LEN);
+    ensure!(!too_long, "reason too long");
+    Ok(())
 }
 
 /// Encode one message as a CBOR body (no length prefix)
@@ -140,6 +208,19 @@ pub async fn read_message<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Messag
         .await
         .context("reading frame body")?;
     decode(&body)
+}
+
+/// How long [`finish_with`] waits for the peer to take a final message
+pub const FINISH_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Send a final message, close the stream, and wait (up to [`FINISH_TIMEOUT`])
+/// until the peer has read it, so the caller can't drop the connection while
+/// the message is still in flight
+pub async fn finish_with(send: &mut quinn::SendStream, message: &Message) -> Result<()> {
+    write_message(send, message).await?;
+    send.finish()?;
+    let _ = tokio::time::timeout(FINISH_TIMEOUT, send.stopped()).await;
+    Ok(())
 }
 
 /// Read a message and require it to be a `Hello`

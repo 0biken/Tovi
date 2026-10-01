@@ -1,7 +1,7 @@
-//! Headless TOVI spike: pair two machines from the terminal.
+//! Headless TOVI spike: pair two machines and send files from the terminal.
 //!
 //! Machine A (desktop role):  tovi-cli listen
-//! Machine B (phone role):    tovi-cli pair "tovi://pair/..."
+//! Machine B (phone role):    tovi-cli send <file> "tovi://pair/..."
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -9,13 +9,16 @@ use qrcode::render::unicode::Dense1x2;
 use qrcode::QrCode;
 use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use tovi_core::identity::{DeviceId, DeviceIdentity, FileKeyStore};
 use tovi_core::pairing::{self, PairingCode, PairingManager, PairingRequest, CODE_LIFETIME};
 use tovi_core::protocol::{Hello, MAX_DEVICE_NAME_LEN};
-use tovi_core::transport::{candidate_addresses, QuicEndpoint};
-use tovi_core::trust::{MemoryTrustStore, TrustStore};
+use tovi_core::transfer::{self, Progress, SendOptions};
+use tovi_core::transport::{candidate_addresses, PeerConnection, QuicEndpoint};
+use tovi_core::trust::{MemoryTrustStore, TrustStore, TrustedDevice};
 
 /// Default UDP port for `listen` (Tech doc §13)
 const DEFAULT_PORT: u16 = 48210;
@@ -23,7 +26,7 @@ const DEFAULT_PORT: u16 = 48210;
 #[derive(Parser)]
 #[command(
     name = "tovi-cli",
-    about = "TOVI headless spike: pair devices from the terminal"
+    about = "TOVI headless spike: pair devices and send files from the terminal"
 )]
 struct Cli {
     /// Where this device's identity key is kept [default: OS data dir/TOVI]
@@ -42,17 +45,27 @@ struct Cli {
 enum Command {
     /// Show this device's ID and the addresses others can reach it at
     Id,
-    /// Wait for devices, showing a QR code to pair a new one (desktop role)
+    /// Wait for devices and receive files, showing a QR code to pair a new one (desktop role)
     Listen {
         /// UDP port to listen on
         #[arg(long, default_value_t = DEFAULT_PORT)]
         port: u16,
+        /// Where received files are saved [default: Downloads/TOVI]
+        #[arg(long)]
+        receive_dir: Option<PathBuf>,
         /// Accept pairing requests without asking. For automated testing only.
         #[arg(long)]
         auto_approve: bool,
     },
     /// Pair with a device using the link from its QR code (phone role)
     Pair {
+        /// The `tovi://pair/...` link
+        uri: String,
+    },
+    /// Pair with a device using its QR link, then send it a file (phone role)
+    Send {
+        /// File to send
+        file: PathBuf,
         /// The `tovi://pair/...` link
         uri: String,
     },
@@ -76,8 +89,32 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Id => show_id(&identity, &name, &data_dir),
-        Command::Listen { port, auto_approve } => listen(identity, name, port, auto_approve).await,
-        Command::Pair { uri } => pair(identity, name, &uri).await,
+        Command::Listen {
+            port,
+            receive_dir,
+            auto_approve,
+        } => {
+            let receive_dir = match receive_dir {
+                Some(dir) => dir,
+                None => dirs::download_dir()
+                    .context("no Downloads folder; pass --receive-dir")?
+                    .join("TOVI"),
+            };
+            listen(identity, name, port, receive_dir, auto_approve).await
+        }
+        Command::Pair { uri } => {
+            let (endpoint, conn, _) = pair(identity, name, &uri).await?;
+            conn.close();
+            endpoint.shutdown().await;
+            Ok(())
+        }
+        Command::Send { file, uri } => {
+            let (endpoint, conn, device) = pair(identity, name, &uri).await?;
+            let result = send(&conn, &file, &device).await;
+            conn.close();
+            endpoint.shutdown().await;
+            result
+        }
     }
 }
 
@@ -88,7 +125,7 @@ fn default_device_name() -> String {
     name.chars().take(MAX_DEVICE_NAME_LEN).collect()
 }
 
-fn show_id(identity: &DeviceIdentity, name: &str, data_dir: &std::path::Path) -> Result<()> {
+fn show_id(identity: &DeviceIdentity, name: &str, data_dir: &Path) -> Result<()> {
     println!("Name:       {name}");
     println!("Device ID:  {}", identity.device_id());
     println!(
@@ -105,10 +142,18 @@ fn show_id(identity: &DeviceIdentity, name: &str, data_dir: &std::path::Path) ->
     Ok(())
 }
 
+struct Listener {
+    manager: Arc<PairingManager>,
+    hello: Hello,
+    receive_dir: PathBuf,
+    auto_approve: bool,
+}
+
 async fn listen(
     identity: Arc<DeviceIdentity>,
     name: String,
     port: u16,
+    receive_dir: PathBuf,
     auto_approve: bool,
 ) -> Result<()> {
     let trust: Arc<dyn TrustStore> = Arc::new(MemoryTrustStore::new());
@@ -130,43 +175,89 @@ async fn listen(
         println!("WARNING: --auto-approve is on; any device with this code will be trusted.\n");
     }
     println!("{name} is listening on port {port}. Press Ctrl+C to stop.");
+    println!("Received files go to {}", receive_dir.display());
 
-    let hello = Hello::new(name);
+    let listener = Arc::new(Listener {
+        manager,
+        hello: Hello::new(name),
+        receive_dir,
+        auto_approve,
+    });
     loop {
         let incoming = tokio::select! {
             incoming = endpoint.accept() => incoming,
             _ = tokio::signal::ctrl_c() => break,
         };
         let Some(result) = incoming else { break };
-        let conn = match result {
-            Ok(conn) => conn,
-            Err(e) => {
-                println!("Refused a connection: {e:#}");
-                continue;
+        match result {
+            Ok(conn) => {
+                tokio::spawn(handle_connection(listener.clone(), conn));
             }
-        };
-
-        if manager.trust().is_trusted(conn.peer_id()) {
-            println!(
-                "Trusted device {} connected (file transfer not built yet)",
-                short(conn.peer_id())
-            );
-            continue;
-        }
-        match pairing::respond(&conn, &manager, &hello, |req| ask_user(req, auto_approve)).await {
-            Ok(device) => println!(
-                "Paired with {} ({}, {})",
-                device.name,
-                device.platform,
-                short(&device.id)
-            ),
-            Err(e) => println!("Pairing failed: {e:#}"),
+            Err(e) => println!("Refused a connection: {e:#}"),
         }
     }
 
     println!("Shutting down...");
     endpoint.shutdown().await;
     Ok(())
+}
+
+/// Untrusted devices may only pair; once trusted, they may send files
+async fn handle_connection(listener: Arc<Listener>, conn: PeerConnection) {
+    let manager = &listener.manager;
+    let name = match manager
+        .trust()
+        .list()
+        .into_iter()
+        .find(|d| d.id == *conn.peer_id())
+    {
+        Some(device) => device.name,
+        None => {
+            let ask = |req| ask_user(req, listener.auto_approve);
+            match pairing::respond(&conn, manager, &listener.hello, ask).await {
+                Ok(device) => {
+                    println!("Paired with {}", describe(&device));
+                    device.name
+                }
+                Err(e) => {
+                    println!("Pairing failed: {e:#}");
+                    return;
+                }
+            }
+        }
+    };
+
+    let name = &name;
+    loop {
+        let progress = ProgressPrinter::new("Receiving");
+        let received = transfer::receive_next(
+            &conn,
+            &listener.receive_dir,
+            |offer| async move {
+                println!(
+                    "{name} is sending {} ({}). Accepted: trusted device.",
+                    offer.file_name,
+                    megabytes(offer.file_size)
+                );
+                true
+            },
+            |p| progress.update(p),
+        )
+        .await;
+        match received {
+            Ok(Some(file)) => println!(
+                "Saved {} ({}, {})",
+                file.path.display(),
+                megabytes(file.size),
+                progress.rate(file.size)
+            ),
+            Ok(None) => break,
+            Err(e) => {
+                println!("Receive failed: {e:#}");
+                break;
+            }
+        }
+    }
 }
 
 fn print_pairing_code(code: &PairingCode) -> Result<()> {
@@ -209,7 +300,12 @@ async fn ask_user(request: PairingRequest, auto_approve: bool) -> bool {
     .unwrap_or(false)
 }
 
-async fn pair(identity: Arc<DeviceIdentity>, name: String, uri: &str) -> Result<()> {
+/// Pair using a QR link; returns the open connection to the paired device
+async fn pair(
+    identity: Arc<DeviceIdentity>,
+    name: String,
+    uri: &str,
+) -> Result<(QuicEndpoint, PeerConnection, TrustedDevice)> {
     let code = PairingCode::from_uri(uri.trim())?;
     // This side only connects out, so it accepts no incoming connections
     let endpoint = QuicEndpoint::bind(
@@ -229,16 +325,72 @@ async fn pair(identity: Arc<DeviceIdentity>, name: String, uri: &str) -> Result<
     )
     .await?;
     println!(
-        "Paired with {} ({}, {}) at {}",
-        device.name,
-        device.platform,
-        short(&device.id),
+        "Paired with {} at {}",
+        describe(&device),
         conn.remote_address()
     );
+    Ok((endpoint, conn, device))
+}
 
-    conn.close();
-    endpoint.shutdown().await;
+async fn send(conn: &PeerConnection, file: &Path, device: &TrustedDevice) -> Result<()> {
+    println!("Sending {} to {}...", file.display(), device.name);
+    let progress = ProgressPrinter::new("Sending");
+    let hash =
+        transfer::send_file(conn, file, SendOptions::default(), |p| progress.update(p)).await?;
+    let size = std::fs::metadata(file)?.len();
+    println!(
+        "Sent and verified by {} ({}, {}). BLAKE3 {}",
+        device.name,
+        megabytes(size),
+        progress.rate(size),
+        &hash.to_hex()[..16]
+    );
     Ok(())
+}
+
+/// Prints progress every 10%, and the average speed at the end
+struct ProgressPrinter {
+    label: &'static str,
+    started: Instant,
+    last_tenth: AtomicU64,
+}
+
+impl ProgressPrinter {
+    fn new(label: &'static str) -> Self {
+        Self {
+            label,
+            started: Instant::now(),
+            last_tenth: AtomicU64::new(0),
+        }
+    }
+
+    fn update(&self, p: Progress) {
+        if p.total == 0 {
+            return;
+        }
+        let tenth = p.done * 10 / p.total;
+        if tenth > self.last_tenth.swap(tenth, Ordering::Relaxed) {
+            println!("  {} {}%", self.label, tenth * 10);
+        }
+    }
+
+    fn rate(&self, bytes: u64) -> String {
+        let secs = self.started.elapsed().as_secs_f64().max(0.001);
+        format!("{:.1} MB/s", bytes as f64 / 1_000_000.0 / secs)
+    }
+}
+
+fn megabytes(bytes: u64) -> String {
+    format!("{:.1} MB", bytes as f64 / 1_000_000.0)
+}
+
+fn describe(device: &TrustedDevice) -> String {
+    format!(
+        "{} ({}, {})",
+        device.name,
+        device.platform,
+        short(&device.id)
+    )
 }
 
 /// First 8 hex characters of a device ID, for display

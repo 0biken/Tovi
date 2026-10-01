@@ -17,7 +17,6 @@ rustls-webpki = { version = "0.103", default-features = false, features = ["allo
 # Identity & Crypto
 ed25519-dalek = { version = "2.1", features = ["rand_core", "pkcs8"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
-sha2 = "0.10" # For file hashing
 blake3 = "1.8" # Chunk/file hashing and pairing MAC (decisions.md D5, D2)
 
 # Wire format (decisions.md D6)
@@ -33,3 +32,4 @@ if-addrs = "0.13" # Enumerate local interfaces for QR candidate endpoints (alrea
 # Utilities
 anyhow = "1.0"
 tracing = "0.1"
+fs4 = "1.1" # Free disk space check before accepting a transfer
