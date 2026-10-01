@@ -246,6 +246,15 @@ impl PeerConnection {
     pub async fn closed(&self) -> ConnectionError {
         self.inner.closed().await
     }
+
+    /// Whether the other side closed this connection because it does not
+    /// authorize us ([`CLOSE_UNAUTHORIZED`])
+    pub fn was_refused(&self) -> bool {
+        matches!(
+            self.inner.close_reason(),
+            Some(ConnectionError::ApplicationClosed(close)) if close.error_code == CLOSE_UNAUTHORIZED
+        )
+    }
 }
 
 /// Addresses on this machine that a phone on the same network could reach us

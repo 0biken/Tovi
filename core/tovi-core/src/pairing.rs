@@ -332,6 +332,33 @@ pub async fn initiate(
         .connect_any(&code.endpoints, &code.desktop_key)
         .await?;
 
+    let their_hello =
+        match exchange(&conn, code, our_hello, our_id).await {
+            Ok(hello) => hello,
+            // The desktop's authorizer turned us away: no open pairing session
+            Err(e) if conn.was_refused() => return Err(e.context(
+                "the other device refused the connection: this pairing code was already used or \
+                 has expired. Ask for a new code.",
+            )),
+            Err(e) => return Err(e),
+        };
+
+    let device = TrustedDevice {
+        id: *conn.peer_id(),
+        name: their_hello.device_name,
+        platform: their_hello.platform,
+    };
+    trust.add(device.clone());
+    Ok((conn, device))
+}
+
+/// Phone side of the HELLO / PAIR / PAIR_RESULT exchange; returns the desktop's HELLO
+async fn exchange(
+    conn: &PeerConnection,
+    code: &PairingCode,
+    our_hello: &Hello,
+    our_id: &DeviceId,
+) -> Result<Hello> {
     let (mut send, mut recv) = conn.open_bi().await?;
     protocol::write_message(&mut send, &Message::Hello(our_hello.clone())).await?;
     let their_hello = protocol::read_hello(&mut recv).await?;
@@ -355,14 +382,7 @@ pub async fn initiate(
         }
         other => bail!("expected PAIR_RESULT, got {other:?}"),
     }
-
-    let device = TrustedDevice {
-        id: *conn.peer_id(),
-        name: their_hello.device_name,
-        platform: their_hello.platform,
-    };
-    trust.add(device.clone());
-    Ok((conn, device))
+    Ok(their_hello)
 }
 
 #[cfg(test)]
@@ -538,7 +558,11 @@ mod tests {
 
         // Session consumed: the endpoint now refuses unknown devices outright
         let server = serve_once(desktop, true);
-        assert!(second.pair(&code).await.is_err());
+        let err = second.pair(&code).await.unwrap_err();
+        assert!(
+            err.to_string().contains("already used or has expired"),
+            "{err:#}"
+        );
         let (result, _) = server.await.unwrap();
         assert!(result.is_err());
         assert!(second.trust.list().is_empty());
