@@ -105,16 +105,51 @@ impl QuicEndpoint {
         addr: SocketAddr,
         server_key: &VerifyingKey,
     ) -> Result<PeerConnection> {
+        self.connect_any(&[addr], server_key).await
+    }
+
+    /// Try every address at once and keep the first connection that completes
+    /// the handshake with `server_key`; the other attempts are abandoned.
+    /// Used with the QR code's candidate endpoints (decisions.md D3).
+    pub async fn connect_any(
+        &self,
+        addrs: &[SocketAddr],
+        server_key: &VerifyingKey,
+    ) -> Result<PeerConnection> {
         let mut tls = self.identity.client_config(*server_key)?;
         tls.alpn_protocols = vec![ALPN.to_vec()];
         let mut client = quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(tls)?));
         client.transport_config(self.transport.clone());
 
-        let connecting = self.endpoint.connect_with(client, addr, SERVER_NAME)?;
-        let conn = tokio::time::timeout(CONNECT_TIMEOUT, connecting)
-            .await
-            .map_err(|_| anyhow!("timed out connecting to {addr}"))??;
-        PeerConnection::new(conn)
+        let mut last_error = anyhow!("no addresses to connect to");
+        let mut attempts = tokio::task::JoinSet::new();
+        for &addr in addrs {
+            // An unusable address (e.g. IPv6 on an IPv4 socket) skips just that candidate
+            let connecting = match self
+                .endpoint
+                .connect_with(client.clone(), addr, SERVER_NAME)
+            {
+                Ok(connecting) => connecting,
+                Err(e) => {
+                    last_error = anyhow!(e).context(format!("connecting to {addr}"));
+                    continue;
+                }
+            };
+            attempts.spawn(async move {
+                tokio::time::timeout(CONNECT_TIMEOUT, connecting)
+                    .await
+                    .map_err(|_| anyhow!("timed out connecting to {addr}"))?
+                    .with_context(|| format!("connecting to {addr}"))
+            });
+        }
+
+        while let Some(result) = attempts.join_next().await {
+            match result? {
+                Ok(conn) => return PeerConnection::new(conn), // dropping `attempts` aborts the rest
+                Err(e) => last_error = e,
+            }
+        }
+        Err(last_error)
     }
 
     /// Wait for the next incoming connection.
@@ -313,6 +348,49 @@ mod tests {
 
         let server_conn = server_task.await.unwrap();
         assert_eq!(server_conn.peer_id(), &phone.device_id());
+    }
+
+    #[tokio::test]
+    async fn connect_any_finds_the_reachable_address() {
+        let desktop = Arc::new(DeviceIdentity::generate_new());
+        let phone = Arc::new(DeviceIdentity::generate_new());
+        let server = endpoint(&desktop, true);
+        let client = endpoint(&phone, true);
+        let live = server.local_addr().unwrap();
+        // A port nobody listens on, and an address family this socket can't use
+        let dead = std::net::UdpSocket::bind(LOCALHOST)
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let wrong_family: SocketAddr = "[::1]:9".parse().unwrap();
+
+        let server_task = tokio::spawn(async move { server.accept().await.unwrap().is_ok() });
+        let started = std::time::Instant::now();
+        let conn = client
+            .connect_any(&[dead, wrong_family, live], &desktop.public_key())
+            .await
+            .unwrap();
+
+        assert_eq!(conn.remote_address(), live);
+        // Didn't wait for the dead address to time out
+        assert!(started.elapsed() < CONNECT_TIMEOUT / 2);
+        assert!(server_task.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn connect_any_reports_failure_when_nothing_answers() {
+        let desktop = Arc::new(DeviceIdentity::generate_new());
+        let client = endpoint(&Arc::new(DeviceIdentity::generate_new()), true);
+        let wrong_family: SocketAddr = "[::1]:9".parse().unwrap();
+
+        assert!(client
+            .connect_any(&[], &desktop.public_key())
+            .await
+            .is_err());
+        assert!(client
+            .connect_any(&[wrong_family], &desktop.public_key())
+            .await
+            .is_err());
     }
 
     #[tokio::test]
