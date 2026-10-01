@@ -51,6 +51,8 @@ Decisions are recorded in [`architecture/decisions.md`](architecture/decisions.m
 - [x] Server rejects client keys the `PeerAuthorizer` refuses (trust store + pairing sessions implement it in §5)
 - [x] Enumerate candidate addresses (skip loopback, link-local, Hyper-V/WSL/Docker/VPN); IPv4
 - [ ] IPv6 candidates and dual-stack bind
+- [x] `connect_any`: try all QR endpoints in parallel, first verified connection wins
+- [ ] Accept handshakes concurrently so slow or hostile clients cannot delay others
 - [x] Connection timeouts (10 s connect, 30 s idle), 10 s keep-alive, graceful close with close codes
 
 ## 4. Core — discovery (`discovery`)
@@ -62,19 +64,23 @@ Decisions are recorded in [`architecture/decisions.md`](architecture/decisions.m
 
 ## 5. Core — pairing (new `pairing` module)
 
-- [ ] Ephemeral pairing session: secret, nonce, absolute expiry, single use
-- [ ] QR payload encode/decode + terminal QR render for the CLI spike
-- [ ] Pairing handshake over QUIC, bound to TLS session
-- [ ] Desktop-side approval step (Allow / Cancel) required even with valid QR
-- [ ] Persist trusted device (public key, name, platform, trusted flag)
-- [ ] Revoke / forget device
+- [x] Ephemeral pairing session: 32-byte secret, absolute 60 s expiry, single use, closed after 3 failed attempts
+- [x] QR payload encode/decode (`tovi://pair/<base64url(CBOR)>`, ~150 chars)
+- [ ] Terminal QR render for the CLI spike (§10)
+- [x] Pairing handshake over QUIC, bound to TLS session (BLAKE3 keyed MAC over TLS exporter + both keys)
+- [x] Desktop-side approval step (Allow / Cancel) required even with valid QR
+- [x] Trusted-device store (`TrustStore` trait, in-memory)
+- [ ] Persist trusted devices to disk (with §9 storage)
+- [x] Revoke / forget device (`TrustStore::remove`)
 
 ## 6. Core — protocol (`protocol`)
 
-- [ ] Message types: HELLO, CAPABILITIES, PAIR, AUTH, TRANSFER_INIT / META / CHUNK / ACK / COMPLETE / VERIFY
-- [ ] Framing codec over QUIC streams
-- [ ] Version negotiation (`protocol`, `min_protocol`, capabilities)
-- [ ] Fuzz tests for the decoder (malformed packet testing, §42)
+- [x] Message types for connection and pairing: HELLO (incl. capabilities), PAIR, PAIR_RESULT
+- [ ] Transfer message types: TRANSFER_INIT / META / ACK / COMPLETE / VERIFY (with §7)
+- [x] Framing codec over QUIC streams (4-byte length + CBOR, 64 KiB cap, validated fields)
+- [x] Version negotiation (`protocol`, `min_protocol`, capabilities)
+- [x] Randomized decoder robustness test (20k random inputs, no panics)
+- [ ] `cargo-fuzz` target for the decoder (malformed packet testing, §42)
 
 ## 7. Core — transfer engine (`transfer`)
 
