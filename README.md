@@ -21,24 +21,29 @@ cargo test --workspace
 cargo build -p tovi-cli
 ```
 
-## Try pairing two machines
+## Try it on two machines
 
-Both machines must be on the same network, for example the same home Wi-Fi.
+Both machines must be on the same network, for example the same home Wi-Fi. Use `--release`
+builds when measuring speed.
 
 On the first machine (the "desktop"):
 
 ```bash
-cargo run -p tovi-cli -- listen
+cargo run --release -p tovi-cli -- listen
 ```
 
 It prints a QR code and a `tovi://pair/...` link, valid for 60 seconds. On the second machine,
-paste the link:
+send a file using that link:
 
 ```bash
-cargo run -p tovi-cli -- pair "tovi://pair/..."
+cargo run --release -p tovi-cli -- send path/to/file "tovi://pair/..."
 ```
 
-The first machine asks `Allow? [y/N]`. Answer `y` and both sides report the pairing.
+The first machine asks `Allow? [y/N]`. Answer `y`: the devices pair, the file is sent, and it is
+saved in `Downloads/TOVI` (change with `listen --receive-dir <folder>`) once its BLAKE3 hash
+matches. Both sides show progress and speed.
+
+To pair without sending anything, use `pair "tovi://pair/..."` instead of `send`.
 
 Notes:
 
@@ -48,5 +53,6 @@ Notes:
 - `tovi-cli id` shows this device's ID and the addresses it can be reached at.
 - To run two instances on one machine, give each its own identity: `--data-dir <folder>`.
 - Development builds keep the identity key **unencrypted** in the OS data folder (`%APPDATA%\TOVI`
-  on Windows). Trusted devices are not saved yet, so pairings last only while `listen` runs.
-- File transfer is not built yet.
+  on Windows). Trusted devices are not saved yet, so pairings last only while `listen` runs, and
+  each `send` pairs again with a fresh code.
+- Interrupted transfers start over; resume is not built yet.

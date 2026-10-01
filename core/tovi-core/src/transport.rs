@@ -191,7 +191,9 @@ fn transport_config() -> Result<TransportConfig> {
     Ok(config)
 }
 
-/// An authenticated connection to another TOVI device
+/// An authenticated connection to another TOVI device. Cheap to clone; clones
+/// share the same connection.
+#[derive(Clone)]
 pub struct PeerConnection {
     inner: quinn::Connection,
     peer_id: DeviceId,
@@ -225,6 +227,24 @@ impl PeerConnection {
 
     pub async fn accept_bi(&self) -> Result<(SendStream, RecvStream)> {
         Ok(self.inner.accept_bi().await?)
+    }
+
+    /// Like [`Self::accept_bi`], but `Ok(None)` once the connection has been
+    /// closed normally by either side
+    pub async fn next_bi(&self) -> Result<Option<(SendStream, RecvStream)>> {
+        match self.inner.accept_bi().await {
+            Ok(streams) => Ok(Some(streams)),
+            Err(ConnectionError::ApplicationClosed(_) | ConnectionError::LocallyClosed) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub async fn open_uni(&self) -> Result<SendStream> {
+        Ok(self.inner.open_uni().await?)
+    }
+
+    pub async fn accept_uni(&self) -> Result<RecvStream> {
+        Ok(self.inner.accept_uni().await?)
     }
 
     /// 32 bytes of keying material unique to this TLS session; both sides

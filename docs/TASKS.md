@@ -76,7 +76,7 @@ Decisions are recorded in [`architecture/decisions.md`](architecture/decisions.m
 ## 6. Core — protocol (`protocol`)
 
 - [x] Message types for connection and pairing: HELLO (incl. capabilities), PAIR, PAIR_RESULT
-- [ ] Transfer message types: TRANSFER_INIT / META / ACK / COMPLETE / VERIFY (with §7)
+- [x] Transfer message types: TRANSFER_OFFER / TRANSFER_RESPONSE / CHUNK / TRANSFER_COMPLETE / TRANSFER_RESULT
 - [x] Framing codec over QUIC streams (4-byte length + CBOR, 64 KiB cap, validated fields)
 - [x] Version negotiation (`protocol`, `min_protocol`, capabilities)
 - [x] Randomized decoder robustness test (20k random inputs, no panics)
@@ -84,15 +84,15 @@ Decisions are recorded in [`architecture/decisions.md`](architecture/decisions.m
 
 ## 7. Core — transfer engine (`transfer`)
 
-- [ ] Streaming chunk reader (no full-file buffering)
-- [ ] Per-chunk BLAKE3 hash + whole-file BLAKE3 (replace `sha2` dependency)
-- [ ] Receiver writes to `*.tovi.part`, verifies, then atomic rename
-- [ ] Filename sanitisation: strip separators and `..`, Windows reserved names, length limits
-- [ ] Duplicate filename handling (`name (1).ext`)
-- [ ] Receive-folder setting (default `Downloads/TOVI`)
-- [ ] Low-disk-space check before accepting
+- [x] Streaming chunk reader (no full-file buffering; at most 4 chunks in memory)
+- [x] Per-chunk BLAKE3 hash + whole-file BLAKE3, receiver re-reads the file from disk to verify (`sha2` removed)
+- [x] Receiver writes to `<name>.<id>.tovi.part`, verifies, then renames; part file deleted on failure
+- [x] Filename sanitisation: strip separators and `..`, Windows reserved names and characters, length limits
+- [x] Duplicate filename handling (`name (1).ext`)
+- [x] Receive-folder setting (default `Downloads/TOVI`, CLI `--receive-dir`)
+- [x] Low-disk-space check before accepting (file size + 64 MB margin)
 - [ ] Transfer state machine (§23)
-- [ ] Progress / speed events for UI
+- [x] Progress events for UI (CLI shows percentage and MB/s)
 - [ ] Pause / cancel
 
 ## 8. Core — resume
@@ -113,7 +113,8 @@ Decisions are recorded in [`architecture/decisions.md`](architecture/decisions.m
 - [x] CLI: `tovi-cli id` / `listen` (QR + approval prompt) / `pair <link>`; persistent identity via `--data-dir`
 - [x] Live pairing between two CLI processes over the Wi-Fi address; reused link refused with a clear message
 - [ ] Pair two physical machines over home Wi-Fi with the CLI
-- [ ] CLI: `tovi-cli send <file> <device>` (needs §7)
+- [x] CLI: `tovi-cli send <file> <link>` (pairs, then sends on the same connection); `listen` receives from trusted devices only
+- [x] 2 GiB transfer between two CLI processes on one machine via the Wi-Fi address: 86.6 MB/s, SHA-256 of source and received file identical
 - [ ] Desktop ↔ desktop 2 GB transfer over LAN, checksum verified
 - [ ] Transfer resumes after Wi-Fi toggle mid-transfer
 - [ ] QR pairing works with mDNS blocked
