@@ -46,11 +46,12 @@ Decisions are recorded in [`architecture/decisions.md`](architecture/decisions.m
 
 ## 3. Core — transport (`transport`)
 
-- [ ] `Transport` trait (connect / accept / open stream) — transport-agnostic per §2
-- [ ] QUIC LAN implementation with `quinn` (server + client endpoints, mutual TLS)
-- [ ] Server rejects any client key that is neither trusted nor in an active pairing session (the TLS verifier accepts any Ed25519 key; trust is enforced here)
-- [ ] Bind to all interfaces; enumerate candidate addresses (skip Hyper-V/WSL/Docker/VPN where possible)
-- [ ] Connection timeouts, keep-alive, graceful close
+- [x] Transport abstraction: one secure QUIC endpoint (`QuicEndpoint`); LAN, Wi-Fi Direct/Aware and relay links supply IP paths to it (matches Tech doc §2 diagram)
+- [x] QUIC LAN implementation with `quinn` (server + client endpoints, mutual TLS, ALPN `tvp/1`)
+- [x] Server rejects client keys the `PeerAuthorizer` refuses (trust store + pairing sessions implement it in §5)
+- [x] Enumerate candidate addresses (skip loopback, link-local, Hyper-V/WSL/Docker/VPN); IPv4
+- [ ] IPv6 candidates and dual-stack bind
+- [x] Connection timeouts (10 s connect, 30 s idle), 10 s keep-alive, graceful close with close codes
 
 ## 4. Core — discovery (`discovery`)
 

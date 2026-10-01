@@ -21,6 +21,7 @@ sha2 = "0.10" # For file hashing
 
 # Discovery (Phase 1 mDNS)
 mdns-sd = "0.11"
+if-addrs = "0.13" # Enumerate local interfaces for QR candidate endpoints (already used by mdns-sd)
 
 # Utilities
 anyhow = "1.0"
