@@ -273,7 +273,7 @@ where
 
     let pair = match protocol::read_message(&mut recv).await? {
         Message::Pair(pair) => pair,
-        other => bail!("expected PAIR, got {other:?}"),
+        other => bail!("expected PAIR, got {}", other.kind()),
     };
     let exporter = conn.export_keying_material(EXPORTER_LABEL, b"")?;
 
@@ -300,7 +300,14 @@ where
         name: request.device_name,
         platform: request.platform,
     };
-    manager.trust.add(device.clone());
+    if let Err(e) = manager.trust.add(device.clone()) {
+        send_result(
+            &mut send,
+            Some("could not save the pairing on the other device"),
+        )
+        .await?;
+        return Err(e.context("saving the trusted device"));
+    }
     send_result(&mut send, None).await?;
     Ok(device)
 }
@@ -345,7 +352,9 @@ pub async fn initiate(
         name: their_hello.device_name,
         platform: their_hello.platform,
     };
-    trust.add(device.clone());
+    trust
+        .add(device.clone())
+        .context("saving the trusted device")?;
     Ok((conn, device))
 }
 
@@ -377,7 +386,7 @@ async fn exchange(
                 reason.unwrap_or_else(|| "no reason given".into())
             )
         }
-        other => bail!("expected PAIR_RESULT, got {other:?}"),
+        other => bail!("expected PAIR_RESULT, got {}", other.kind()),
     }
     Ok(their_hello)
 }
@@ -505,8 +514,8 @@ mod tests {
 
         assert!(err.to_string().contains("declined"), "{err}");
         assert!(result.is_err());
-        assert!(phone.trust.list().is_empty());
-        assert!(desktop.manager.trust().list().is_empty());
+        assert!(phone.trust.list().unwrap().is_empty());
+        assert!(desktop.manager.trust().list().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -537,7 +546,7 @@ mod tests {
         assert!(err.to_string().contains("invalid"), "{err}");
         assert!(result.is_err());
         assert!(!asked.load(std::sync::atomic::Ordering::SeqCst));
-        assert!(desktop.manager.trust().list().is_empty());
+        assert!(desktop.manager.trust().list().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -562,7 +571,7 @@ mod tests {
         );
         let (result, _) = server.await.unwrap();
         assert!(result.is_err());
-        assert!(second.trust.list().is_empty());
+        assert!(second.trust.list().unwrap().is_empty());
     }
 
     #[test]
@@ -622,11 +631,13 @@ mod tests {
         let manager = PairingManager::new(desktop.public_key(), trust.clone());
         let stranger = DeviceIdentity::generate_new().device_id();
         let friend = DeviceIdentity::generate_new().device_id();
-        trust.add(TrustedDevice {
-            id: friend,
-            name: "Friend".into(),
-            platform: "macos".into(),
-        });
+        trust
+            .add(TrustedDevice {
+                id: friend,
+                name: "Friend".into(),
+                platform: "macos".into(),
+            })
+            .unwrap();
 
         assert!(!manager.authorize(&stranger));
         assert!(manager.authorize(&friend));

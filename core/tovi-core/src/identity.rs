@@ -24,6 +24,26 @@ impl DeviceId {
     }
 }
 
+impl TryFrom<&[u8]> for DeviceId {
+    type Error = anyhow::Error;
+
+    /// Accepts only a valid 32-byte Ed25519 public key
+    fn try_from(bytes: &[u8]) -> Result<Self> {
+        let bytes: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("device ID must be 32 bytes"))?;
+        let key = VerifyingKey::from_bytes(&bytes).context("device ID is not an Ed25519 key")?;
+        Ok(Self::from(&key))
+    }
+}
+
+impl DeviceId {
+    /// The identity key this ID stands for
+    pub fn public_key(&self) -> Result<VerifyingKey> {
+        VerifyingKey::from_bytes(&self.0).context("device ID is not an Ed25519 key")
+    }
+}
+
 impl From<&VerifyingKey> for DeviceId {
     fn from(key: &VerifyingKey) -> Self {
         Self(key.to_bytes())

@@ -70,7 +70,7 @@ Decisions are recorded in [`architecture/decisions.md`](architecture/decisions.m
 - [x] Pairing handshake over QUIC, bound to TLS session (BLAKE3 keyed MAC over TLS exporter + both keys)
 - [x] Desktop-side approval step (Allow / Cancel) required even with valid QR
 - [x] Trusted-device store (`TrustStore` trait, in-memory)
-- [ ] Persist trusted devices to disk (with §9 storage)
+- [x] Persist trusted devices to disk (`Store` implements `TrustStore`; storage errors fail closed)
 - [x] Revoke / forget device (`TrustStore::remove`)
 
 ## 6. Core — protocol (`protocol`)
@@ -105,18 +105,22 @@ Decisions are recorded in [`architecture/decisions.md`](architecture/decisions.m
 - [x] Dropped connection keeps partial files; corruption, decline or protocol errors delete them
 - [x] Re-offer of an already-saved transfer is confirmed by its hash, not saved twice (remembered in memory for 10 minutes)
 - [ ] Clean up abandoned partial files (e.g. older than 7 days)
-- [ ] Resume across a sender app restart (persist outgoing transfer IDs)
+- [x] Resume across a sender restart: an unfinished send of the same file (path, size, modified time) to the same device reuses its ID
+- [x] "Already finished" check survives a receiver restart (history store)
+- [x] Refused connections are never retried; other drops back off (0.5–5 s) and give up after 2 minutes without progress
 
 ## 9. Core — storage (new `storage` module)
 
-- [ ] SQLite schema: devices, transfers, transfer_chunks, settings, sessions
-- [ ] Migrations
-- [ ] Transfer history queries
+- [x] SQLite schema: devices (with last addresses), transfers, settings. Per-chunk progress stays in `.tovi.state`; pairing sessions are never stored (single-use secrets)
+- [x] Migrations (`PRAGMA user_version`, one transaction each; a newer database is refused)
+- [x] Transfer history for both directions (started / completed / failed, hash, error)
+- [ ] Paired device whose address changed (e.g. new DHCP lease) can only be found again via discovery (§4)
 
 ## 10. Spike validation (Tech doc §49)
 
 - [x] CLI: `tovi-cli id` / `listen` (QR + approval prompt) / `pair <link>`; persistent identity via `--data-dir`
 - [x] Live pairing between two CLI processes over the Wi-Fi address; reused link refused with a clear message
+- [x] CLI: pairings persist; `send <file> <device name>` without a link; `devices`, `forget`, `history`
 - [ ] Pair two physical machines over home Wi-Fi with the CLI
 - [x] CLI: `tovi-cli send <file> <link>` (pairs, then sends on the same connection); `listen` receives from trusted devices only
 - [x] 2 GiB transfer between two CLI processes on one machine via the Wi-Fi address: 86.6 MB/s, SHA-256 of source and received file identical

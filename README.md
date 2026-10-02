@@ -43,18 +43,35 @@ The first machine asks `Allow? [y/N]`. Answer `y`: the devices pair, the file is
 saved in `Downloads/TOVI` (change with `listen --receive-dir <folder>`) once its BLAKE3 hash
 matches. Both sides show progress and speed.
 
-To pair without sending anything, use `pair "tovi://pair/..."` instead of `send`.
+The pairing is saved on both machines, so after that just use the desktop's name:
+
+```bash
+cargo run --release -p tovi-cli -- send path/to/file "DESKTOP-NAME"
+```
+
+`listen` must be running on the desktop. To pair without sending anything, use
+`pair "tovi://pair/..."`.
+
+| Command | What it does |
+|---|---|
+| `id` | This device's name, ID and addresses |
+| `listen` | Receive files; shows a QR code to pair a new device |
+| `pair <link>` | Pair using a QR link |
+| `send <file> <link or device>` | Send a file, pairing first if given a link |
+| `devices` | Paired devices and where they were last seen |
+| `forget <device>` | Stop trusting a device; it must pair again |
+| `history` | Recent transfers, both directions |
 
 Notes:
 
 - Windows asks whether `tovi-cli` may use the network the first time `listen` runs. Allow it on
   **private** networks, or the other machine can't connect.
 - Each pairing code works once. Run `listen` again for a new one.
-- `tovi-cli id` shows this device's ID and the addresses it can be reached at.
-- To run two instances on one machine, give each its own identity: `--data-dir <folder>`.
-- Development builds keep the identity key **unencrypted** in the OS data folder (`%APPDATA%\TOVI`
-  on Windows). Trusted devices are not saved yet, so pairings last only while `listen` runs, and
-  each `send` pairs again with a fresh code.
+- To run two instances on one machine, give each its own data folder: `--data-dir <folder>`.
+- The identity key and the database (`tovi.db`: paired devices, history) live in the OS data
+  folder (`%APPDATA%\TOVI` on Windows). Development builds keep the key **unencrypted**.
+- A paired device is reached at its last known address. If that changes (for example a new
+  address from the router), pair again; automatic discovery is not built yet.
 - If the connection drops mid-transfer, `send` reconnects for up to 2 minutes and resumes where it
-  left off. The partial file waits in the receive folder as `<name>.<id>.tovi.part` with a
-  `.tovi.state` file beside it. Restarting `send` itself starts a new transfer.
+  left off. If it gives up, running the same `send` again resumes too. The partial file waits in
+  the receive folder as `<name>.<id>.tovi.part` with a `.tovi.state` file beside it.
