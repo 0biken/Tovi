@@ -154,6 +154,20 @@ pub struct PairResult {
 }
 
 impl Message {
+    /// The message's type name as on the wire, e.g. `TRANSFER_OFFER`
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Message::Hello(_) => "HELLO",
+            Message::Pair(_) => "PAIR",
+            Message::PairResult(_) => "PAIR_RESULT",
+            Message::TransferOffer(_) => "TRANSFER_OFFER",
+            Message::TransferResponse(_) => "TRANSFER_RESPONSE",
+            Message::Chunk(_) => "CHUNK",
+            Message::TransferComplete(_) => "TRANSFER_COMPLETE",
+            Message::TransferResult(_) => "TRANSFER_RESULT",
+        }
+    }
+
     fn validate(&self) -> Result<()> {
         match self {
             Message::Hello(hello) => hello.validate(),
@@ -240,7 +254,7 @@ pub async fn finish_with(send: &mut quinn::SendStream, message: &Message) -> Res
 pub async fn read_hello<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Hello> {
     match read_message(reader).await? {
         Message::Hello(hello) => Ok(hello),
-        other => bail!("expected HELLO, got {other:?}"),
+        other => bail!("expected HELLO, got {}", other.kind()),
     }
 }
 

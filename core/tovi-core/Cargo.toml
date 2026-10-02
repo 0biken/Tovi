@@ -25,6 +25,9 @@ ciborium = "0.2"
 serde_bytes = "0.11"
 base64 = "0.22" # QR pairing URI (decisions.md D3)
 
+# Local storage: trusted devices, transfer history (TASKS §9)
+rusqlite = { version = "0.40", features = ["bundled"] } # Bundled SQLite: same version on every platform
+
 # Discovery (Phase 1 mDNS)
 mdns-sd = "0.11"
 if-addrs = "0.13" # Enumerate local interfaces for QR candidate endpoints (already used by mdns-sd)

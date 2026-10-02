@@ -1,9 +1,10 @@
 //! Trusted devices: the devices this one has paired with.
 //!
-//! In memory for now; persistence moves to SQLite with the rest of local
-//! storage (TASKS §9).
+//! [`crate::storage::Store`] keeps them on disk; [`MemoryTrustStore`] is for
+//! tests and throwaway sessions.
 
 use crate::identity::DeviceId;
+use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -15,12 +16,17 @@ pub struct TrustedDevice {
 }
 
 pub trait TrustStore: Send + Sync {
+    /// Fails closed: if the store can't be read, the device is not trusted
     fn is_trusted(&self, id: &DeviceId) -> bool;
-    /// Add or replace a trusted device
-    fn add(&self, device: TrustedDevice);
+    /// Add or update a trusted device
+    fn add(&self, device: TrustedDevice) -> Result<()>;
     /// Revoke / forget a device. Returns whether it was trusted.
-    fn remove(&self, id: &DeviceId) -> bool;
-    fn list(&self) -> Vec<TrustedDevice>;
+    fn remove(&self, id: &DeviceId) -> Result<bool>;
+    fn list(&self) -> Result<Vec<TrustedDevice>>;
+
+    fn get(&self, id: &DeviceId) -> Result<Option<TrustedDevice>> {
+        Ok(self.list()?.into_iter().find(|d| d.id == *id))
+    }
 }
 
 #[derive(Default)]
@@ -39,16 +45,17 @@ impl TrustStore for MemoryTrustStore {
         self.devices.lock().unwrap().contains_key(id)
     }
 
-    fn add(&self, device: TrustedDevice) {
+    fn add(&self, device: TrustedDevice) -> Result<()> {
         self.devices.lock().unwrap().insert(device.id, device);
+        Ok(())
     }
 
-    fn remove(&self, id: &DeviceId) -> bool {
-        self.devices.lock().unwrap().remove(id).is_some()
+    fn remove(&self, id: &DeviceId) -> Result<bool> {
+        Ok(self.devices.lock().unwrap().remove(id).is_some())
     }
 
-    fn list(&self) -> Vec<TrustedDevice> {
-        self.devices.lock().unwrap().values().cloned().collect()
+    fn list(&self) -> Result<Vec<TrustedDevice>> {
+        Ok(self.devices.lock().unwrap().values().cloned().collect())
     }
 }
 
@@ -68,12 +75,13 @@ mod tests {
         };
 
         assert!(!store.is_trusted(&id));
-        store.add(device.clone());
+        store.add(device.clone()).unwrap();
         assert!(store.is_trusted(&id));
-        assert_eq!(store.list(), vec![device]);
+        assert_eq!(store.list().unwrap(), vec![device.clone()]);
+        assert_eq!(store.get(&id).unwrap(), Some(device));
 
-        assert!(store.remove(&id));
+        assert!(store.remove(&id).unwrap());
         assert!(!store.is_trusted(&id));
-        assert!(!store.remove(&id));
+        assert!(!store.remove(&id).unwrap());
     }
 }
