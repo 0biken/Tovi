@@ -97,10 +97,15 @@ Decisions are recorded in [`architecture/decisions.md`](architecture/decisions.m
 
 ## 8. Core — resume
 
-- [ ] Receiver manifest (received chunk set) persisted to disk
-- [ ] Resume negotiation: sender sends manifest request, receiver replies with missing chunks
-- [ ] Source change detection (size + mtime, or hash) before resuming
-- [ ] Auto-reconnect after network drop
+- [x] Receiver state (received chunk ranges) persisted next to the part file (`.tovi.state`), replaced atomically after every verified chunk
+- [x] Resume negotiation: sender re-offers the same transfer ID; receiver replies with the chunk ranges it holds; sender sends only the rest
+- [x] Source change detection (size + mtime) before resuming; whole-file hash still checked at the end
+- [x] Auto-reconnect after network drop (`send_with_resume`: reconnects to the QR addresses with backoff for up to 2 minutes)
+- [x] A newer connection takes over a transfer from a stalled one that has not noticed the drop yet
+- [x] Dropped connection keeps partial files; corruption, decline or protocol errors delete them
+- [x] Re-offer of an already-saved transfer is confirmed by its hash, not saved twice (remembered in memory for 10 minutes)
+- [ ] Clean up abandoned partial files (e.g. older than 7 days)
+- [ ] Resume across a sender app restart (persist outgoing transfer IDs)
 
 ## 9. Core — storage (new `storage` module)
 

@@ -16,7 +16,7 @@ use std::time::Instant;
 use tovi_core::identity::{DeviceId, DeviceIdentity, FileKeyStore};
 use tovi_core::pairing::{self, PairingCode, PairingManager, PairingRequest, CODE_LIFETIME};
 use tovi_core::protocol::{Hello, MAX_DEVICE_NAME_LEN};
-use tovi_core::transfer::{self, Progress, SendOptions};
+use tovi_core::transfer::{self, Inbox, OutgoingTransfer, Progress, SendOptions};
 use tovi_core::transport::{candidate_addresses, PeerConnection, QuicEndpoint};
 use tovi_core::trust::{MemoryTrustStore, TrustStore, TrustedDevice};
 
@@ -103,15 +103,14 @@ async fn main() -> Result<()> {
             listen(identity, name, port, receive_dir, auto_approve).await
         }
         Command::Pair { uri } => {
-            let (endpoint, conn, _) = pair(identity, name, &uri).await?;
+            let (endpoint, conn, _, _) = pair(identity, name, &uri).await?;
             conn.close();
             endpoint.shutdown().await;
             Ok(())
         }
         Command::Send { file, uri } => {
-            let (endpoint, conn, device) = pair(identity, name, &uri).await?;
-            let result = send(&conn, &file, &device).await;
-            conn.close();
+            let (endpoint, conn, device, code) = pair(identity, name, &uri).await?;
+            let result = send(&endpoint, conn, &code, &file, &device).await;
             endpoint.shutdown().await;
             result
         }
@@ -145,7 +144,8 @@ fn show_id(identity: &DeviceIdentity, name: &str, data_dir: &Path) -> Result<()>
 struct Listener {
     manager: Arc<PairingManager>,
     hello: Hello,
-    receive_dir: PathBuf,
+    /// Shared by all connections, so a reconnecting sender can resume
+    inbox: Inbox,
     auto_approve: bool,
 }
 
@@ -180,7 +180,7 @@ async fn listen(
     let listener = Arc::new(Listener {
         manager,
         hello: Hello::new(name),
-        receive_dir,
+        inbox: Inbox::new(receive_dir),
         auto_approve,
     });
     loop {
@@ -230,28 +230,41 @@ async fn handle_connection(listener: Arc<Listener>, conn: PeerConnection) {
     let name = &name;
     loop {
         let progress = ProgressPrinter::new("Receiving");
-        let received = transfer::receive_next(
-            &conn,
-            &listener.receive_dir,
-            |offer| async move {
-                println!(
-                    "{name} is sending {} ({}). Accepted: trusted device.",
-                    offer.file_name,
-                    megabytes(offer.file_size)
-                );
-                true
-            },
-            |p| progress.update(p),
-        )
-        .await;
+        let received = listener
+            .inbox
+            .receive_next(
+                &conn,
+                |offer| async move {
+                    println!(
+                        "{name} is sending {} ({}). Accepted: trusted device.",
+                        offer.file_name,
+                        megabytes(offer.file_size)
+                    );
+                    true
+                },
+                |p| progress.update(p),
+            )
+            .await;
         match received {
-            Ok(Some(file)) => println!(
-                "Saved {} ({}, {})",
-                file.path.display(),
-                megabytes(file.size),
-                progress.rate(file.size)
-            ),
+            Ok(Some(file)) => {
+                let resumed = match file.resumed_bytes {
+                    0 => String::new(),
+                    bytes => format!(", resumed with {} already here", megabytes(bytes)),
+                };
+                println!(
+                    "Saved {} ({}, {}{resumed})",
+                    file.path.display(),
+                    megabytes(file.size),
+                    progress.rate(file.size - file.resumed_bytes)
+                );
+            }
             Ok(None) => break,
+            Err(e) if conn.is_closed() => {
+                println!(
+                    "Connection to {name} lost ({e:#}); kept the partial file so it can resume"
+                );
+                break;
+            }
             Err(e) => {
                 println!("Receive failed: {e:#}");
                 break;
@@ -305,7 +318,7 @@ async fn pair(
     identity: Arc<DeviceIdentity>,
     name: String,
     uri: &str,
-) -> Result<(QuicEndpoint, PeerConnection, TrustedDevice)> {
+) -> Result<(QuicEndpoint, PeerConnection, TrustedDevice, PairingCode)> {
     let code = PairingCode::from_uri(uri.trim())?;
     // This side only connects out, so it accepts no incoming connections
     let endpoint = QuicEndpoint::bind(
@@ -329,15 +342,33 @@ async fn pair(
         describe(&device),
         conn.remote_address()
     );
-    Ok((endpoint, conn, device))
+    Ok((endpoint, conn, device, code))
 }
 
-async fn send(conn: &PeerConnection, file: &Path, device: &TrustedDevice) -> Result<()> {
+/// Send `file`, reconnecting (using the QR code's addresses and key) and
+/// resuming if the connection drops
+async fn send(
+    endpoint: &QuicEndpoint,
+    conn: PeerConnection,
+    code: &PairingCode,
+    file: &Path,
+    device: &TrustedDevice,
+) -> Result<()> {
     println!("Sending {} to {}...", file.display(), device.name);
+    let transfer = OutgoingTransfer::new(file, SendOptions::default())?;
+    let size = transfer.file_size();
     let progress = ProgressPrinter::new("Sending");
-    let hash =
-        transfer::send_file(conn, file, SendOptions::default(), |p| progress.update(p)).await?;
-    let size = std::fs::metadata(file)?.len();
+    let (conn, hash) = transfer::send_with_resume(
+        endpoint,
+        &code.endpoints,
+        &code.desktop_key,
+        conn,
+        &transfer,
+        |p| progress.update(p),
+        |e| println!("Connection lost ({e:#}); reconnecting to resume..."),
+    )
+    .await?;
+    conn.close();
     println!(
         "Sent and verified by {} ({}, {}). BLAKE3 {}",
         device.name,

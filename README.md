@@ -55,4 +55,6 @@ Notes:
 - Development builds keep the identity key **unencrypted** in the OS data folder (`%APPDATA%\TOVI`
   on Windows). Trusted devices are not saved yet, so pairings last only while `listen` runs, and
   each `send` pairs again with a fresh code.
-- Interrupted transfers start over; resume is not built yet.
+- If the connection drops mid-transfer, `send` reconnects for up to 2 minutes and resumes where it
+  left off. The partial file waits in the receive folder as `<name>.<id>.tovi.part` with a
+  `.tovi.state` file beside it. Restarting `send` itself starts a new transfer.
