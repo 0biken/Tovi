@@ -199,6 +199,15 @@ pub struct PeerConnection {
     peer_id: DeviceId,
 }
 
+impl fmt::Debug for PeerConnection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PeerConnection")
+            .field("peer", &self.peer_id)
+            .field("remote", &self.remote_address())
+            .finish()
+    }
+}
+
 impl PeerConnection {
     fn new(inner: quinn::Connection) -> Result<Self> {
         let certs = inner
@@ -260,6 +269,12 @@ impl PeerConnection {
 
     pub fn close(&self) {
         self.inner.close(CLOSE_NORMAL, b"done");
+    }
+
+    /// Close because we don't accept this device; the peer sees
+    /// [`CLOSE_UNAUTHORIZED`] (and [`Self::was_refused`] on its side)
+    pub fn refuse(&self) {
+        self.inner.close(CLOSE_UNAUTHORIZED, b"unauthorized");
     }
 
     /// Wait until the connection is closed, by either side, and return why

@@ -26,6 +26,7 @@ use crate::protocol::{
     self, ChunkHeader, Message, TransferComplete, TransferOffer, TransferResponse, TransferResult,
     MAX_HAVE_RANGES,
 };
+use crate::storage::{Direction, NewTransfer, Store};
 use crate::transport::{PeerConnection, QuicEndpoint};
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use ed25519_dalek::VerifyingKey;
@@ -110,6 +111,20 @@ impl fmt::Display for SourceChanged {
 
 impl std::error::Error for SourceChanged {}
 
+/// The connection dropped and could not be re-established within
+/// [`RECONNECT_WINDOW`]. The transfer can still be resumed later: the receiver
+/// keeps its partial file.
+#[derive(Debug)]
+pub struct ConnectionLost(pub String);
+
+impl fmt::Display for ConnectionLost {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "connection lost and could not reconnect: {}", self.0)
+    }
+}
+
+impl std::error::Error for ConnectionLost {}
+
 fn chunk_count(file_size: u64, chunk_size: u32) -> u64 {
     file_size.div_ceil(u64::from(chunk_size))
 }
@@ -173,6 +188,15 @@ pub struct OutgoingTransfer {
 
 impl OutgoingTransfer {
     pub fn new(path: &Path, options: SendOptions) -> Result<Self> {
+        let mut transfer_id = [0u8; 16];
+        OsRng.fill_bytes(&mut transfer_id);
+        Self::with_id(path, options, transfer_id)
+    }
+
+    /// Continue an earlier, unfinished send (e.g. after an app restart) under
+    /// its original ID, so the receiver can resume it. The receiver still
+    /// checks every chunk and the whole file.
+    pub fn with_id(path: &Path, options: SendOptions, transfer_id: TransferId) -> Result<Self> {
         let chunk_size = options.chunk_size;
         ensure!(
             (MIN_CHUNK_SIZE..=MAX_CHUNK_SIZE).contains(&chunk_size),
@@ -185,8 +209,6 @@ impl OutgoingTransfer {
             .and_then(|n| n.to_str())
             .ok_or_else(|| anyhow!("{} has no usable file name", path.display()))?
             .to_string();
-        let mut transfer_id = [0u8; 16];
-        OsRng.fill_bytes(&mut transfer_id);
         Ok(Self {
             transfer_id,
             path: path.to_path_buf(),
@@ -199,6 +221,32 @@ impl OutgoingTransfer {
 
     pub fn file_size(&self) -> u64 {
         self.file_size
+    }
+
+    pub fn transfer_id(&self) -> TransferId {
+        self.transfer_id
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Source file's modified time when this transfer was created
+    pub fn modified(&self) -> Option<SystemTime> {
+        self.modified
+    }
+
+    /// The history row for sending this file to `device`
+    pub fn history_record(&self, device: &DeviceId) -> NewTransfer {
+        NewTransfer {
+            id: self.transfer_id,
+            device_id: *device,
+            direction: Direction::Sent,
+            file_name: self.file_name.clone(),
+            file_size: self.file_size,
+            path: Some(self.path.clone()),
+            source_modified: self.modified,
+        }
     }
 
     /// One attempt: offer (or resume) the file, send what the receiver lacks,
@@ -231,7 +279,7 @@ impl OutgoingTransfer {
                 }
                 from_ranges(&r.have, count)?
             }
-            other => bail!("expected TRANSFER_RESPONSE, got {other:?}"),
+            other => bail!("expected TRANSFER_RESPONSE, got {}", other.kind()),
         };
 
         let total = self.file_size;
@@ -287,7 +335,7 @@ impl OutgoingTransfer {
                     );
                 }
             }
-            other => bail!("expected TRANSFER_RESULT, got {other:?}"),
+            other => bail!("expected TRANSFER_RESULT, got {}", other.kind()),
         }
         Ok(file_hash)
     }
@@ -307,9 +355,12 @@ pub async fn send_file(
 
 /// Send `transfer`, reconnecting and resuming if the connection drops.
 ///
-/// Reconnects to `addrs` (pinning `server_key`) for up to
-/// [`RECONNECT_WINDOW`] after each drop; `on_drop` is told about each one.
-/// Returns the connection in use at the end, which may be a new one.
+/// After a drop it waits briefly (backing off from 0.5 s to 5 s between
+/// attempts), reconnects to `addrs` pinning `server_key`, and resumes. It gives
+/// up with [`ConnectionLost`] once [`RECONNECT_WINDOW`] has passed without the
+/// receiver gaining any more of the file. A connection the receiver refused
+/// (it no longer trusts this device) is never retried. `on_drop` is told about
+/// each drop. Returns the connection in use at the end, which may be a new one.
 pub async fn send_with_resume(
     endpoint: &QuicEndpoint,
     addrs: &[SocketAddr],
@@ -319,16 +370,43 @@ pub async fn send_with_resume(
     progress: impl Fn(Progress),
     on_drop: impl Fn(&anyhow::Error),
 ) -> Result<(PeerConnection, blake3::Hash)> {
+    let furthest = AtomicU64::new(0);
+    let mut furthest_at_last_drop = 0;
+    let mut give_up_at: Option<Instant> = None;
+    let mut delay = Duration::from_millis(500);
     loop {
-        match transfer.send(&conn, &progress).await {
+        let attempt = transfer.send(&conn, |p| {
+            furthest.fetch_max(p.done, Ordering::Relaxed);
+            progress(p)
+        });
+        match attempt.await {
             Ok(hash) => return Ok((conn, hash)),
-            // Only a lost connection is worth retrying; refusals and integrity
-            // failures arrive on a connection that is still open
+            Err(e) if conn.was_refused() => {
+                return Err(e.context(
+                    "the other device refused the connection; it may no longer trust this device",
+                ))
+            }
+            // Refusals and integrity failures arrive on a connection that is
+            // still open; only a closed one is worth retrying
             Err(e) if conn.is_closed() => {
                 on_drop(&e);
-                conn = reconnect(endpoint, addrs, server_key)
+                let reached = furthest.load(Ordering::Relaxed);
+                if reached > furthest_at_last_drop {
+                    // Progress since the last drop: start the clock again
+                    give_up_at = None;
+                    delay = Duration::from_millis(500);
+                }
+                furthest_at_last_drop = reached;
+                let deadline = *give_up_at.get_or_insert_with(|| Instant::now() + RECONNECT_WINDOW);
+                let lost = |why: String| anyhow::Error::new(ConnectionLost(why));
+                if Instant::now() + delay >= deadline {
+                    return Err(lost(format!("{e:#}")));
+                }
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_secs(5));
+                conn = reconnect(endpoint, addrs, server_key, deadline)
                     .await
-                    .with_context(|| format!("connection lost ({e:#}) and could not reconnect"))?;
+                    .map_err(|re| lost(format!("{e:#}; last attempt: {re:#}")))?;
             }
             Err(e) => return Err(e),
         }
@@ -339,8 +417,8 @@ async fn reconnect(
     endpoint: &QuicEndpoint,
     addrs: &[SocketAddr],
     server_key: &VerifyingKey,
+    deadline: Instant,
 ) -> Result<PeerConnection> {
-    let deadline = Instant::now() + RECONNECT_WINDOW;
     let mut delay = Duration::from_millis(500);
     loop {
         match endpoint.connect_any(addrs, server_key).await {
@@ -383,6 +461,9 @@ pub struct Inbox {
     /// Recently finished transfers, so a sender that lost the connection
     /// before hearing "saved" is confirmed instead of sending a second copy
     completed: Mutex<HashMap<TransferId, Completed>>,
+    /// Where accepted transfers are recorded; also lets a retried transfer be
+    /// confirmed after the receiving app restarts
+    history: Option<Arc<Store>>,
 }
 
 #[derive(Clone)]
@@ -536,6 +617,25 @@ impl Inbox {
             active: Mutex::new(HashMap::new()),
             next_generation: AtomicU64::new(0),
             completed: Mutex::new(HashMap::new()),
+            history: None,
+        }
+    }
+
+    /// An inbox that records transfers in `store`
+    pub fn with_history(dir: impl Into<PathBuf>, store: Arc<Store>) -> Self {
+        Self {
+            history: Some(store),
+            ..Self::new(dir)
+        }
+    }
+
+    /// Record in the history store, if any. History is a convenience: a
+    /// failure is logged and never fails the transfer.
+    fn log_history(&self, write: impl FnOnce(&Store) -> Result<()>) {
+        if let Some(store) = &self.history {
+            if let Err(e) = write(store) {
+                tracing::warn!("could not update transfer history: {e:#}");
+            }
         }
     }
 
@@ -562,7 +662,7 @@ impl Inbox {
         };
         let offer = match protocol::read_message(&mut control_recv).await? {
             Message::TransferOffer(offer) => offer,
-            other => bail!("expected TRANSFER_OFFER, got {other:?}"),
+            other => bail!("expected TRANSFER_OFFER, got {}", other.kind()),
         };
         let id = offer.transfer_id;
 
@@ -595,6 +695,18 @@ impl Inbox {
             }
         };
         let resumed_bytes = partial.received_bytes();
+        let sender = *conn.peer_id();
+        self.log_history(|store| {
+            store.record_transfer_started(&NewTransfer {
+                id,
+                device_id: sender,
+                direction: Direction::Received,
+                file_name: name.clone(),
+                file_size: offer.file_size,
+                path: None,
+                source_modified: None,
+            })
+        });
         let accept = Message::TransferResponse(TransferResponse {
             transfer_id: id,
             accepted: true,
@@ -618,6 +730,7 @@ impl Inbox {
             let path = finalize(&partial.part_path, &self.dir, &name)?;
             let _ = fs::remove_file(&partial.state_path);
             self.remember_completed(id, conn.peer_id(), &offer, file_hash, &path);
+            self.log_history(|store| store.record_transfer_completed(&id, Some(&path), &file_hash));
             Ok(ReceivedFile {
                 path,
                 size: offer.file_size,
@@ -625,9 +738,12 @@ impl Inbox {
                 resumed_bytes,
             })
         });
-        if outcome.is_err() && !was_superseded && !conn.is_closed() {
-            // Not a dropped connection: this attempt is over for good
-            partial.discard();
+        if let Err(e) = &outcome {
+            if !was_superseded && !conn.is_closed() {
+                // Not a dropped connection: this attempt is over for good
+                partial.discard();
+                self.log_history(|store| store.record_transfer_failed(&id, &format!("{e:#}")));
+            }
         }
         drop(partial);
         drop(slot_guard);
@@ -646,16 +762,35 @@ impl Inbox {
 
     /// A transfer this inbox already saved, re-offered by the same sender
     fn already_received(&self, offer: &TransferOffer, sender: &DeviceId) -> Option<Completed> {
-        let mut completed = self.completed.lock().unwrap();
-        completed.retain(|_, c| c.at.elapsed() < COMPLETED_MEMORY);
-        completed
-            .get(&offer.transfer_id)
-            .filter(|c| {
+        {
+            let mut completed = self.completed.lock().unwrap();
+            completed.retain(|_, c| c.at.elapsed() < COMPLETED_MEMORY);
+            let remembered = completed.get(&offer.transfer_id).filter(|c| {
                 c.sender == *sender
                     && c.file_size == offer.file_size
                     && c.chunk_size == offer.chunk_size
-            })
-            .cloned()
+            });
+            if let Some(done) = remembered {
+                return Some(done.clone());
+            }
+        }
+        // Survives restarts: the history store knows what was saved
+        let done = self
+            .history
+            .as_ref()?
+            .completed_receive(&offer.transfer_id, sender)
+            .unwrap_or_else(|e| {
+                tracing::warn!("could not read transfer history: {e:#}");
+                None
+            })?;
+        (done.file_size == offer.file_size).then(|| Completed {
+            sender: *sender,
+            file_size: done.file_size,
+            chunk_size: offer.chunk_size,
+            file_hash: done.file_hash,
+            path: done.path,
+            at: Instant::now(),
+        })
     }
 
     fn remember_completed(
@@ -759,7 +894,7 @@ async fn confirm_completed(
         Message::TransferComplete(c) if c.transfer_id == id => {
             blake3::Hash::from_bytes(c.file_hash)
         }
-        other => bail!("expected TRANSFER_COMPLETE, got {other:?}"),
+        other => bail!("expected TRANSFER_COMPLETE, got {}", other.kind()),
     };
 
     let matches = claimed == done.file_hash;
@@ -829,7 +964,7 @@ async fn receive_body(
         Message::TransferComplete(c) if c.transfer_id == offer.transfer_id => {
             blake3::Hash::from_bytes(c.file_hash)
         }
-        other => bail!("expected TRANSFER_COMPLETE, got {other:?}"),
+        other => bail!("expected TRANSFER_COMPLETE, got {}", other.kind()),
     };
 
     // Re-read what is actually on disk, so write errors are caught too
@@ -855,7 +990,7 @@ async fn receive_chunk(
 ) -> Result<(u64, usize)> {
     let header = match protocol::read_message(&mut stream).await? {
         Message::Chunk(header) => header,
-        other => bail!("expected CHUNK, got {other:?}"),
+        other => bail!("expected CHUNK, got {}", other.kind()),
     };
     ensure!(
         header.transfer_id == offer.transfer_id,
@@ -1158,7 +1293,7 @@ mod tests {
             .unwrap();
         let response = match protocol::read_message(&mut control_recv).await.unwrap() {
             Message::TransferResponse(r) => r,
-            other => panic!("expected TRANSFER_RESPONSE, got {other:?}"),
+            other => panic!("expected TRANSFER_RESPONSE, got {}", other.kind()),
         };
         (control, control_recv, response)
     }
@@ -1187,7 +1322,7 @@ mod tests {
                 assert!(!r.ok);
                 assert!(r.reason.unwrap().contains("integrity"));
             }
-            other => panic!("expected TRANSFER_RESULT, got {other:?}"),
+            other => panic!("expected TRANSFER_RESULT, got {}", other.kind()),
         }
         drop(control_recv);
         let err = receiving.await.unwrap().unwrap_err();
@@ -1553,6 +1688,191 @@ mod tests {
         assert_eq!(fs::read(&received.path).unwrap(), data);
         assert_eq!(files_in(&inbox), vec!["done.bin"]);
         fs::remove_dir_all(inbox).unwrap();
+        fs::remove_dir_all(outbox).unwrap();
+    }
+
+    #[tokio::test]
+    async fn received_transfer_is_recorded_in_history() {
+        let link = link().await;
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let inbox = Arc::new(Inbox::with_history(temp_dir(), store.clone()));
+        let outbox = temp_dir();
+        let source = outbox.join("notes.txt");
+        fs::write(&source, b"meeting notes").unwrap();
+
+        let receiving = spawn_receive(inbox.clone(), link.receiver.clone(), true);
+        send_file(&link.sender, &source, SendOptions::default(), |_| {})
+            .await
+            .unwrap();
+        let received = receiving.await.unwrap().unwrap().unwrap();
+
+        let history = store.history(10).unwrap();
+        assert_eq!(history.len(), 1);
+        let record = &history[0];
+        assert_eq!(record.direction, Direction::Received);
+        assert_eq!(record.status, crate::storage::TransferStatus::Completed);
+        assert_eq!(record.device_id, *link.receiver.peer_id());
+        assert_eq!(record.path.as_deref(), Some(received.path.as_path()));
+        assert_eq!(record.file_hash, Some(received.file_hash));
+        fs::remove_dir_all(inbox.dir()).unwrap();
+        fs::remove_dir_all(outbox).unwrap();
+    }
+
+    #[tokio::test]
+    async fn finished_transfer_is_confirmed_after_receiver_restart() {
+        let link = link().await;
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let dir = temp_dir();
+        let outbox = temp_dir();
+        let source = outbox.join("song.flac");
+        fs::write(&source, random_bytes(MIN_CHUNK_SIZE as usize + 7)).unwrap();
+        let options = SendOptions {
+            chunk_size: MIN_CHUNK_SIZE,
+        };
+        let transfer = OutgoingTransfer::new(&source, options).unwrap();
+
+        let first_inbox = Arc::new(Inbox::with_history(&dir, store.clone()));
+        let receiving = spawn_receive(first_inbox, link.receiver.clone(), true);
+        transfer.send(&link.sender, |_| {}).await.unwrap();
+        receiving.await.unwrap().unwrap().unwrap();
+
+        // Receiver restarts (new Inbox, empty memory, same database); the
+        // sender, unsure whether it finished, sends the same transfer again
+        let restarted = Arc::new(Inbox::with_history(&dir, store.clone()));
+        let addr = link.receiver_endpoint.local_addr().unwrap();
+        let (retry, retry_receiver) = tokio::join!(
+            link.sender_endpoint.connect(addr, &link.receiver_key),
+            link.receiver_endpoint.accept()
+        );
+        let confirming = spawn_receive(restarted, retry_receiver.unwrap().unwrap(), true);
+        transfer.send(&retry.unwrap(), |_| {}).await.unwrap();
+        let confirmed = confirming.await.unwrap().unwrap().unwrap();
+
+        assert_eq!(confirmed.resumed_bytes, transfer.file_size());
+        assert_eq!(files_in(&dir), vec!["song.flac"]);
+        fs::remove_dir_all(dir).unwrap();
+        fs::remove_dir_all(outbox).unwrap();
+    }
+
+    #[tokio::test]
+    async fn restarted_sender_resumes_under_its_recorded_id() {
+        let link = link().await;
+        let inbox = temp_dir();
+        let outbox = temp_dir();
+        let data = random_bytes(MIN_CHUNK_SIZE as usize * 8);
+        let source = outbox.join("backup.zip");
+        fs::write(&source, &data).unwrap();
+        let options = SendOptions {
+            chunk_size: MIN_CHUNK_SIZE,
+        };
+        let sender_db = Store::open_in_memory().unwrap();
+        let receiver_id = *link.sender.peer_id();
+
+        // First run: the send is recorded, 3 chunks arrive, then the sender dies
+        let original = OutgoingTransfer::new(&source, options).unwrap();
+        sender_db
+            .record_transfer_started(&original.history_record(&receiver_id))
+            .unwrap();
+        let got_three = Arc::new(tokio::sync::Notify::new());
+        let first = {
+            let inbox = Inbox::new(&inbox);
+            let conn = link.receiver.clone();
+            let signal = got_three.clone();
+            tokio::spawn(async move {
+                inbox
+                    .receive_next(
+                        &conn,
+                        |_| async { true },
+                        |p| {
+                            if p.done >= u64::from(MIN_CHUNK_SIZE) * 3 {
+                                signal.notify_one();
+                            }
+                        },
+                    )
+                    .await
+            })
+        };
+        let (_control, _control_recv, _) = offer_raw(
+            &link.sender,
+            original.transfer_id(),
+            "backup.zip",
+            data.len() as u64,
+            MIN_CHUNK_SIZE,
+        )
+        .await;
+        send_chunks_raw(&link.sender, original.transfer_id(), &data, 0..3).await;
+        got_three.notified().await;
+        link.sender.close();
+        assert!(first.await.unwrap().is_err());
+
+        // Second run: a fresh process finds the unfinished send and reuses its ID
+        let found = sender_db
+            .unfinished_send(
+                &receiver_id,
+                &source,
+                data.len() as u64,
+                original.modified(),
+            )
+            .unwrap()
+            .expect("unfinished send should be found");
+        assert_eq!(found, original.transfer_id());
+        let resumed = OutgoingTransfer::with_id(&source, options, found).unwrap();
+
+        let addr = link.receiver_endpoint.local_addr().unwrap();
+        let (conn, receiver_conn) = tokio::join!(
+            link.sender_endpoint.connect(addr, &link.receiver_key),
+            link.receiver_endpoint.accept()
+        );
+        let receiving = spawn_receive(
+            Arc::new(Inbox::new(&inbox)),
+            receiver_conn.unwrap().unwrap(),
+            true,
+        );
+        resumed.send(&conn.unwrap(), |_| {}).await.unwrap();
+        let received = receiving.await.unwrap().unwrap().unwrap();
+
+        assert_eq!(received.resumed_bytes, u64::from(MIN_CHUNK_SIZE) * 3);
+        assert_eq!(fs::read(&received.path).unwrap(), data);
+        fs::remove_dir_all(inbox).unwrap();
+        fs::remove_dir_all(outbox).unwrap();
+    }
+
+    #[tokio::test]
+    async fn refused_connection_is_not_retried() {
+        // e.g. the receiver forgot this device: retrying would only hammer it
+        let link = link().await;
+        let outbox = temp_dir();
+        let source = outbox.join("note.txt");
+        fs::write(&source, b"hello").unwrap();
+        let transfer = OutgoingTransfer::new(&source, SendOptions::default()).unwrap();
+
+        let receiver = link.receiver.clone();
+        let refusing = tokio::spawn(async move {
+            let _ = receiver.accept_bi().await;
+            receiver.refuse();
+        });
+        let drops = AtomicU64::new(0);
+        let addr = link.receiver_endpoint.local_addr().unwrap();
+        let started = Instant::now();
+        let err = send_with_resume(
+            &link.sender_endpoint,
+            &[addr],
+            &link.receiver_key,
+            link.sender.clone(),
+            &transfer,
+            |_| {},
+            |_| {
+                drops.fetch_add(1, Ordering::Relaxed);
+            },
+        )
+        .await
+        .unwrap_err();
+        refusing.await.unwrap();
+
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        assert!(err.to_string().contains("refused"), "{err:#}");
+        assert!(err.downcast_ref::<ConnectionLost>().is_none());
+        assert!(started.elapsed() < Duration::from_secs(5));
         fs::remove_dir_all(outbox).unwrap();
     }
 
