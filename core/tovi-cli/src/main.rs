@@ -3,27 +3,28 @@
 //! Machine A (desktop role):  tovi-cli listen
 //! Machine B (phone role):    tovi-cli send <file> "tovi://pair/..."   (first time)
 //!                            tovi-cli send <file> <device name>       (afterwards)
+//!
+//! `listen`, `pair` and `send` drive a [`Node`], the same engine the desktop
+//! app uses, and print its events.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use qrcode::render::unicode::Dense1x2;
 use qrcode::QrCode;
+use std::collections::HashMap;
 use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::sync::broadcast::{self, error::RecvError};
 use tovi_core::identity::{DeviceId, DeviceIdentity, FileKeyStore};
-use tovi_core::pairing::{self, PairingCode, PairingManager, PairingRequest, CODE_LIFETIME};
-use tovi_core::protocol::{Hello, MAX_DEVICE_NAME_LEN};
+use tovi_core::node::{Event, Node, NodeConfig, TransferOutcome, DEFAULT_PORT};
+use tovi_core::pairing::{PairingCode, CODE_LIFETIME};
+use tovi_core::protocol::MAX_DEVICE_NAME_LEN;
 use tovi_core::storage::{Direction, Store, TransferStatus};
-use tovi_core::transfer::{self, ConnectionLost, Inbox, OutgoingTransfer, Progress, SendOptions};
-use tovi_core::transport::{candidate_addresses, PeerConnection, QuicEndpoint};
+use tovi_core::transfer::{ConnectionLost, TransferId};
+use tovi_core::transport::candidate_addresses;
 use tovi_core::trust::{TrustStore, TrustedDevice};
-
-/// Default UDP port for `listen` (Tech doc §13)
-const DEFAULT_PORT: u16 = 48210;
 
 #[derive(Parser)]
 #[command(
@@ -86,13 +87,6 @@ enum Command {
     },
 }
 
-/// This device: identity, name and local database
-struct Me {
-    identity: Arc<DeviceIdentity>,
-    name: String,
-    store: Arc<Store>,
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
@@ -104,39 +98,32 @@ async fn main() -> Result<()> {
             .context("no OS data directory; pass --data-dir")?
             .join("TOVI"),
     };
-    let me = Me {
-        identity: Arc::new(DeviceIdentity::load_or_generate(&FileKeyStore::new(
-            data_dir.join("identity.key"),
-        ))?),
-        name: cli.name.unwrap_or_else(default_device_name),
-        store: Arc::new(Store::open(&data_dir.join("tovi.db"))?),
-    };
+    let name = cli.name.unwrap_or_else(default_device_name);
+    let store = || Store::open(&data_dir.join("tovi.db"));
 
     match cli.command {
-        Command::Id => show_id(&me, &data_dir),
+        Command::Id => show_id(&data_dir, &name),
         Command::Listen {
             port,
             receive_dir,
             auto_approve,
         } => {
-            let receive_dir = match receive_dir {
-                Some(dir) => dir,
-                None => dirs::download_dir()
-                    .context("no Downloads folder; pass --receive-dir")?
-                    .join("TOVI"),
-            };
-            listen(me, port, receive_dir, auto_approve).await
+            let mut config = node_config(&data_dir, &name)?;
+            config.listen = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
+            config.receive_dir_override = receive_dir;
+            config.auto_approve_pairing = auto_approve;
+            listen(config).await
         }
         Command::Pair { uri } => {
-            let (endpoint, link) = pair(&me, &uri).await?;
-            link.conn.close();
-            endpoint.shutdown().await;
-            Ok(())
+            let (node, _events) = Node::start(outgoing_config(&data_dir, &name)?).await?;
+            let result = pair(&node, &uri).await;
+            node.shutdown().await;
+            result.map(|_| ())
         }
-        Command::Send { file, to } => send(&me, &file, &to).await,
-        Command::Devices => show_devices(&me.store),
-        Command::Forget { device } => forget(&me.store, &device),
-        Command::History { limit } => show_history(&me.store, limit),
+        Command::Send { file, to } => send(outgoing_config(&data_dir, &name)?, &file, &to).await,
+        Command::Devices => show_devices(&store()?),
+        Command::Forget { device } => forget(&store()?, &device),
+        Command::History { limit } => show_history(&store()?, limit),
     }
 }
 
@@ -147,9 +134,25 @@ fn default_device_name() -> String {
     name.chars().take(MAX_DEVICE_NAME_LEN).collect()
 }
 
-fn show_id(me: &Me, data_dir: &Path) -> Result<()> {
-    println!("Name:       {}", me.name);
-    println!("Device ID:  {}", me.identity.device_id());
+fn node_config(data_dir: &Path, name: &str) -> Result<NodeConfig> {
+    let downloads = dirs::download_dir()
+        .context("no Downloads folder; pass --receive-dir")?
+        .join("TOVI");
+    Ok(NodeConfig::new(data_dir, name, downloads))
+}
+
+/// For `pair` and `send`: any free port, so a `listen` on this machine keeps 48210
+fn outgoing_config(data_dir: &Path, name: &str) -> Result<NodeConfig> {
+    let mut config = node_config(data_dir, name)?;
+    config.listen = SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0));
+    Ok(config)
+}
+
+fn show_id(data_dir: &Path, name: &str) -> Result<()> {
+    let identity =
+        DeviceIdentity::load_or_generate(&FileKeyStore::new(data_dir.join("identity.key")))?;
+    println!("Name:       {name}");
+    println!("Device ID:  {}", identity.device_id());
     println!(
         "Data:       {} (identity key file is unencrypted in development builds)",
         data_dir.display()
@@ -166,146 +169,45 @@ fn show_id(me: &Me, data_dir: &Path) -> Result<()> {
 
 // -------------------------------------------------------------- listen
 
-struct Listener {
-    manager: Arc<PairingManager>,
-    store: Arc<Store>,
-    hello: Hello,
-    /// Shared by all connections, so a reconnecting sender can resume
-    inbox: Inbox,
-    auto_approve: bool,
-}
+async fn listen(config: NodeConfig) -> Result<()> {
+    let requested_port = config.listen.port();
+    let auto_approve = config.auto_approve_pairing;
+    let (node, mut events) = Node::start(config).await?;
+    let port = node.local_addr()?.port();
 
-async fn listen(me: Me, port: u16, receive_dir: PathBuf, auto_approve: bool) -> Result<()> {
-    let trust: Arc<dyn TrustStore> = me.store.clone();
-    let manager = Arc::new(PairingManager::new(me.identity.public_key(), trust));
-    let endpoint = QuicEndpoint::bind(
-        me.identity.clone(),
-        SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)),
-        manager.clone(),
-    )?;
-    let port = endpoint.local_addr()?.port();
-
-    let addresses = candidate_addresses(port)?;
-    if addresses.is_empty() {
-        bail!("no usable network address; connect to Wi-Fi or Ethernet");
-    }
-    let code = manager.start_session(addresses);
-    print_pairing_code(&code)?;
+    print_pairing_code(&node.new_pairing_code()?)?;
     if auto_approve {
         println!("WARNING: --auto-approve is on; any device with this code will be trusted.\n");
     }
-    let paired = me.store.list()?.len();
+    if port != requested_port {
+        println!("Port {requested_port} is in use, so this uses port {port}.");
+    }
+    let paired = node.devices()?.len();
     println!(
         "{} is listening on port {port}. {paired} paired device(s) can send without a code.",
-        me.name
+        node.device_name()
     );
     println!(
         "Received files go to {}. Press Ctrl+C to stop.",
-        receive_dir.display()
+        node.receive_dir().display()
     );
 
-    let listener = Arc::new(Listener {
-        manager,
-        store: me.store.clone(),
-        hello: Hello::new(me.name),
-        inbox: Inbox::with_history(receive_dir, me.store),
-        auto_approve,
-    });
+    let mut printer = EventPrinter::default();
     loop {
-        let incoming = tokio::select! {
-            incoming = endpoint.accept() => incoming,
+        let event = tokio::select! {
+            event = events.recv() => event,
             _ = tokio::signal::ctrl_c() => break,
         };
-        let Some(result) = incoming else { break };
-        match result {
-            Ok(conn) => {
-                tokio::spawn(handle_connection(listener.clone(), conn));
-            }
-            Err(e) => println!("Refused a connection: {e:#}"),
+        match event {
+            Ok(event) => printer.print(&node, event),
+            Err(RecvError::Lagged(_)) => continue,
+            Err(RecvError::Closed) => break,
         }
     }
 
     println!("Shutting down...");
-    endpoint.shutdown().await;
+    node.shutdown().await;
     Ok(())
-}
-
-/// Untrusted devices may only pair; trusted ones may send files
-async fn handle_connection(listener: Arc<Listener>, conn: PeerConnection) {
-    let known = match listener.store.get(conn.peer_id()) {
-        Ok(known) => known,
-        Err(e) => {
-            println!("Could not read paired devices: {e:#}");
-            return;
-        }
-    };
-    let name = match known {
-        Some(device) => {
-            let _ = listener.store.touch_device(&device.id);
-            device.name
-        }
-        None => {
-            let ask = |req| ask_user(req, listener.auto_approve);
-            match pairing::respond(&conn, &listener.manager, &listener.hello, ask).await {
-                Ok(device) => {
-                    println!("Paired with {} (saved)", describe(&device));
-                    device.name
-                }
-                Err(e) => {
-                    // Not paired: shut the door so the device doesn't retry
-                    conn.refuse();
-                    println!("Refused {}: not paired ({e:#})", short(conn.peer_id()));
-                    return;
-                }
-            }
-        }
-    };
-
-    let name = &name;
-    loop {
-        let progress = ProgressPrinter::new("Receiving");
-        let received = listener
-            .inbox
-            .receive_next(
-                &conn,
-                |offer| async move {
-                    println!(
-                        "{name} is sending {} ({}). Accepted: paired device.",
-                        offer.file_name,
-                        megabytes(offer.file_size)
-                    );
-                    true
-                },
-                |p| progress.update(p),
-            )
-            .await;
-        match received {
-            Ok(Some(file)) => {
-                let resumed = match file.resumed_bytes {
-                    0 => String::new(),
-                    bytes if bytes == file.size => ", already received earlier".into(),
-                    bytes => format!(", resumed with {} already here", megabytes(bytes)),
-                };
-                println!(
-                    "Saved {} ({}, {}{resumed})",
-                    file.path.display(),
-                    megabytes(file.size),
-                    progress.rate(file.size - file.resumed_bytes)
-                );
-            }
-            Ok(None) => break,
-            Err(e) if conn.is_closed() => {
-                println!(
-                    "Connection to {name} lost ({e:#}); kept the partial file so it can resume"
-                );
-                break;
-            }
-            Err(e) => {
-                println!("Receive failed: {e:#}");
-                break;
-            }
-        }
-    }
 }
 
 fn print_pairing_code(code: &PairingCode) -> Result<()> {
@@ -326,185 +228,252 @@ fn print_pairing_code(code: &PairingCode) -> Result<()> {
     Ok(())
 }
 
-async fn ask_user(request: PairingRequest, auto_approve: bool) -> bool {
-    let prompt = format!(
-        "\n{} ({}) wants to pair. Device ID {}.",
-        request.device_name,
-        request.platform,
-        short(&request.device_id)
-    );
-    if auto_approve {
-        println!("{prompt} Auto-approved.");
-        return true;
+/// Ask a yes/no question on the terminal without blocking event handling,
+/// and pass the answer to the node
+fn ask_in_background(node: &Node, request_id: u64, question: String) {
+    let node = node.clone();
+    tokio::spawn(async move {
+        let allow = tokio::task::spawn_blocking(move || {
+            print!("{question} [y/N] ");
+            let _ = std::io::stdout().flush();
+            let mut answer = String::new();
+            std::io::stdin().read_line(&mut answer).is_ok()
+                && matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+        })
+        .await
+        .unwrap_or(false);
+        node.respond(request_id, allow);
+    });
+}
+
+/// Turns node events into terminal output
+#[derive(Default)]
+struct EventPrinter {
+    /// Last 10% step printed, per transfer
+    progress: HashMap<TransferId, u64>,
+}
+
+impl EventPrinter {
+    fn print(&mut self, node: &Node, event: Event) {
+        match event {
+            Event::PairingRequested {
+                request_id,
+                request,
+            } => ask_in_background(
+                node,
+                request_id,
+                format!(
+                    "\n{} ({}) wants to pair. Device ID {}.\nAllow?",
+                    request.device_name,
+                    request.platform,
+                    short(&request.device_id)
+                ),
+            ),
+            Event::Paired { device } => println!("Paired with {} (saved)", describe(&device)),
+            Event::PairingFailed { device_id, error } => {
+                println!("Refused {}: not paired ({error})", short(&device_id))
+            }
+            Event::IncomingOffer {
+                request_id,
+                from,
+                file_name,
+                file_size,
+                ..
+            } => ask_in_background(
+                node,
+                request_id,
+                format!(
+                    "\n{} wants to send {file_name} ({}).\nAccept?",
+                    from.name,
+                    megabytes(file_size)
+                ),
+            ),
+            Event::RequestExpired { .. } => println!("No answer in time; declined."),
+            Event::TransferStarted {
+                direction,
+                device,
+                file_name,
+                file_size,
+                resuming,
+                ..
+            } => match direction {
+                Direction::Received => println!(
+                    "{} is sending {file_name} ({}).",
+                    device.name,
+                    megabytes(file_size)
+                ),
+                Direction::Sent => {
+                    if resuming {
+                        println!("Resuming an earlier, unfinished send of this file");
+                    }
+                    println!("Sending {file_name} to {}...", device.name);
+                }
+            },
+            Event::TransferProgress {
+                transfer_id,
+                direction,
+                done,
+                total,
+                ..
+            } => {
+                if total == 0 {
+                    return;
+                }
+                let tenth = done * 10 / total;
+                let last = self.progress.entry(transfer_id).or_default();
+                if tenth > *last {
+                    *last = tenth;
+                    let label = match direction {
+                        Direction::Sent => "Sending",
+                        Direction::Received => "Receiving",
+                    };
+                    println!("  {label} {}%", tenth * 10);
+                }
+            }
+            Event::TransferReconnecting { error, .. } => {
+                println!("Connection lost ({error}); reconnecting to resume...")
+            }
+            Event::TransferFinished {
+                transfer_id,
+                direction,
+                device,
+                outcome,
+                ..
+            } => {
+                self.progress.remove(&transfer_id);
+                print_finished(direction, &device, outcome);
+            }
+            Event::DevicesChanged => {}
+        }
     }
-    tokio::task::spawn_blocking(move || {
-        print!("{prompt}\nAllow? [y/N] ");
-        let _ = std::io::stdout().flush();
-        let mut answer = String::new();
-        std::io::stdin().read_line(&mut answer).is_ok()
-            && matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
-    })
-    .await
-    .unwrap_or(false)
+}
+
+fn print_finished(direction: Direction, device: &TrustedDevice, outcome: TransferOutcome) {
+    match (direction, outcome) {
+        (
+            Direction::Received,
+            TransferOutcome::Completed {
+                path,
+                size,
+                resumed_bytes,
+                elapsed,
+                ..
+            },
+        ) => {
+            let resumed = match resumed_bytes {
+                0 => String::new(),
+                bytes if bytes == size => ", already received earlier".into(),
+                bytes => format!(", resumed with {} already here", megabytes(bytes)),
+            };
+            let path = path.map(|p| p.display().to_string()).unwrap_or_default();
+            println!(
+                "Saved {path} ({}, {}{resumed})",
+                megabytes(size),
+                rate(size - resumed_bytes, elapsed)
+            );
+        }
+        (
+            Direction::Sent,
+            TransferOutcome::Completed {
+                size,
+                file_hash,
+                elapsed,
+                ..
+            },
+        ) => println!(
+            "Sent and verified by {} ({}, {}). BLAKE3 {}",
+            device.name,
+            megabytes(size),
+            rate(size, elapsed),
+            &file_hash.to_hex()[..16]
+        ),
+        (Direction::Received, TransferOutcome::Interrupted { error }) => println!(
+            "Connection to {} lost ({error}); kept the partial file so it can resume",
+            device.name
+        ),
+        (Direction::Received, TransferOutcome::Failed { error }) => {
+            println!("Receive failed: {error}")
+        }
+        // The sender prints its own failure from the returned error
+        (Direction::Sent, _) => {}
+    }
 }
 
 // ---------------------------------------------------------- pair / send
 
-/// An open connection to a trusted device, and how to reach it again
-struct Link {
-    conn: PeerConnection,
-    device: TrustedDevice,
-    addresses: Vec<SocketAddr>,
-}
-
-/// This side only connects out, so it accepts no incoming connections
-fn outgoing_endpoint(me: &Me) -> Result<QuicEndpoint> {
-    QuicEndpoint::bind(
-        me.identity.clone(),
-        SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)),
-        Arc::new(|_: &DeviceId| false),
-    )
-}
-
-/// Pair using a QR link and save the device and its addresses
-async fn pair(me: &Me, uri: &str) -> Result<(QuicEndpoint, Link)> {
+/// Pair using a QR link; the node saves the device and its addresses
+async fn pair(node: &Node, uri: &str) -> Result<TrustedDevice> {
     let code = PairingCode::from_uri(uri.trim())?;
-    let endpoint = outgoing_endpoint(me)?;
     println!("Connecting to {} address(es)...", code.endpoints.len());
-    let (conn, device) = pairing::initiate(
-        &endpoint,
-        &code,
-        &Hello::new(me.name.clone()),
-        &me.identity.device_id(),
-        me.store.as_ref(),
-    )
-    .await?;
-    // The address that answered goes first next time
-    let mut addresses = vec![conn.remote_address()];
-    addresses.extend(
-        code.endpoints
-            .iter()
-            .filter(|a| **a != conn.remote_address()),
-    );
-    me.store.set_device_addresses(&device.id, &addresses)?;
+    let device = node.pair(uri).await?;
+    let at = node
+        .devices()?
+        .into_iter()
+        .find(|d| d.device.id == device.id)
+        .and_then(|d| d.addresses.first().copied())
+        .map(|a| format!(" at {a}"))
+        .unwrap_or_default();
     println!(
-        "Paired with {} at {} (saved; next time use its name)",
-        describe(&device),
-        conn.remote_address()
+        "Paired with {}{at} (saved; next time use its name)",
+        describe(&device)
     );
-    Ok((
-        endpoint,
-        Link {
-            conn,
-            device,
-            addresses,
-        },
-    ))
+    Ok(device)
 }
 
-/// Connect to an already-paired device at its saved addresses
-async fn connect_paired(me: &Me, query: &str) -> Result<(QuicEndpoint, Link)> {
-    let device = me
-        .store
-        .find_device(query)?
-        .with_context(|| format!("no paired device matches {query:?}; see `tovi-cli devices`"))?;
-    let addresses = me.store.device_addresses(&device.id)?;
-    if addresses.is_empty() {
-        bail!(
-            "no known address for {}; pair again with its QR link",
-            device.name
-        );
-    }
-    let endpoint = outgoing_endpoint(me)?;
-    println!("Connecting to {}...", describe(&device));
-    let conn = endpoint
-        .connect_any(&addresses, &device.id.public_key()?)
-        .await
-        .with_context(|| {
-            format!(
-                "could not reach {} at its last known address; is `tovi-cli listen` running there?",
-                device.name
-            )
-        })?;
-    me.store.touch_device(&device.id)?;
-    Ok((
-        endpoint,
-        Link {
-            conn,
-            device,
-            addresses,
-        },
-    ))
+/// Send `file`, pairing first if `to` is a link. The node reconnects and
+/// resumes after drops, and resumes an unfinished earlier send of the file.
+async fn send(config: NodeConfig, file: &Path, to: &str) -> Result<()> {
+    let (node, mut events) = Node::start(config).await?;
+    let result = send_with(&node, &mut events, file, to).await;
+    node.shutdown().await;
+    result
 }
 
-/// Send `file`, reconnecting and resuming if the connection drops. An
-/// unfinished earlier send of the same file to the same device is resumed.
-async fn send(me: &Me, file: &Path, to: &str) -> Result<()> {
-    let (endpoint, link) = if to.trim().starts_with("tovi://") {
-        pair(me, to).await?
+async fn send_with(
+    node: &Node,
+    events: &mut broadcast::Receiver<Event>,
+    file: &Path,
+    to: &str,
+) -> Result<()> {
+    let device = if to.trim().starts_with("tovi://") {
+        let device = pair(node, to).await?;
+        // `pair` already reported the pairing; skip its events
+        while events.try_recv().is_ok() {}
+        device
     } else {
-        connect_paired(me, to).await?
+        let device = node
+            .find_device(to)?
+            .with_context(|| format!("no paired device matches {to:?}; see `tovi-cli devices`"))?;
+        println!("Connecting to {}...", describe(&device));
+        device
     };
-    let device = &link.device;
 
-    let options = SendOptions::default();
-    let fresh = OutgoingTransfer::new(file, options)?;
-    let transfer = match me.store.unfinished_send(
-        &device.id,
-        fresh.path(),
-        fresh.file_size(),
-        fresh.modified(),
-    )? {
-        Some(id) => {
-            println!("Resuming an earlier, unfinished send of this file");
-            OutgoingTransfer::with_id(file, options, id)?
-        }
-        None => fresh,
-    };
-    me.store
-        .record_transfer_started(&transfer.history_record(&device.id))?;
-
-    println!("Sending {} to {}...", file.display(), device.name);
-    let size = transfer.file_size();
-    let progress = ProgressPrinter::new("Sending");
-    let result = transfer::send_with_resume(
-        &endpoint,
-        &link.addresses,
-        &device.id.public_key()?,
-        link.conn,
-        &transfer,
-        |p| progress.update(p),
-        |e| println!("Connection lost ({e:#}); reconnecting to resume..."),
-    )
-    .await;
-
-    let id = transfer.transfer_id();
-    let outcome = match result {
-        Ok((conn, hash)) => {
-            me.store.record_transfer_completed(&id, None, &hash)?;
-            conn.close();
-            println!(
-                "Sent and verified by {} ({}, {}). BLAKE3 {}",
-                device.name,
-                megabytes(size),
-                progress.rate(size),
-                &hash.to_hex()[..16]
-            );
-            Ok(())
-        }
-        Err(e) => {
-            // A lost connection can be resumed later; anything else (refusal,
-            // changed file, integrity failure) ends this transfer
-            if e.downcast_ref::<ConnectionLost>().is_some() {
-                println!("Run the same command again later to resume.");
-            } else {
-                me.store.record_transfer_failed(&id, &format!("{e:#}"))?;
-            }
-            Err(e)
+    // Print the node's events while the send runs, then any left over
+    let mut printer = EventPrinter::default();
+    let sending = node.send_file(&device.id, file);
+    tokio::pin!(sending);
+    let result = loop {
+        tokio::select! {
+            biased;
+            Ok(event) = events.recv() => printer.print(node, event),
+            result = &mut sending => break result,
         }
     };
-    endpoint.shutdown().await;
-    outcome
+    while let Ok(event) = events.try_recv() {
+        printer.print(node, event);
+    }
+
+    if let Err(e) = &result {
+        if e.downcast_ref::<ConnectionLost>().is_some() {
+            println!("Run the same command again later to resume.");
+        }
+    }
+    result.map(|_| ())
+}
+
+fn rate(bytes: u64, elapsed: Duration) -> String {
+    let secs = elapsed.as_secs_f64().max(0.001);
+    format!("{:.1} MB/s", bytes as f64 / 1_000_000.0 / secs)
 }
 
 // ----------------------------------------------- devices / forget / history
@@ -582,38 +551,6 @@ fn ago(unix_secs: u64) -> String {
 }
 
 // ----------------------------------------------------------- formatting
-
-/// Prints progress every 10%, and the average speed at the end
-struct ProgressPrinter {
-    label: &'static str,
-    started: Instant,
-    last_tenth: AtomicU64,
-}
-
-impl ProgressPrinter {
-    fn new(label: &'static str) -> Self {
-        Self {
-            label,
-            started: Instant::now(),
-            last_tenth: AtomicU64::new(0),
-        }
-    }
-
-    fn update(&self, p: Progress) {
-        if p.total == 0 {
-            return;
-        }
-        let tenth = p.done * 10 / p.total;
-        if tenth > self.last_tenth.swap(tenth, Ordering::Relaxed) {
-            println!("  {} {}%", self.label, tenth * 10);
-        }
-    }
-
-    fn rate(&self, bytes: u64) -> String {
-        let secs = self.started.elapsed().as_secs_f64().max(0.001);
-        format!("{:.1} MB/s", bytes as f64 / 1_000_000.0 / secs)
-    }
-}
 
 fn megabytes(bytes: u64) -> String {
     format!("{:.1} MB", bytes as f64 / 1_000_000.0)

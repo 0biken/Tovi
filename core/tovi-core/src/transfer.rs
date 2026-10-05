@@ -91,6 +91,7 @@ impl Default for SendOptions {
 
 #[derive(Debug, Clone)]
 pub struct ReceivedFile {
+    pub transfer_id: TransferId,
     pub path: PathBuf,
     pub size: u64,
     pub file_hash: blake3::Hash,
@@ -732,6 +733,7 @@ impl Inbox {
             self.remember_completed(id, conn.peer_id(), &offer, file_hash, &path);
             self.log_history(|store| store.record_transfer_completed(&id, Some(&path), &file_hash));
             Ok(ReceivedFile {
+                transfer_id: id,
                 path,
                 size: offer.file_size,
                 file_hash,
@@ -909,6 +911,7 @@ async fn confirm_completed(
         "re-offered transfer does not match the file already received"
     );
     Ok(ReceivedFile {
+        transfer_id: id,
         path: done.path,
         size: offer.file_size,
         file_hash: done.file_hash,

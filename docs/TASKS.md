@@ -144,6 +144,7 @@ Decisions are recorded in [`architecture/decisions.md`](architecture/decisions.m
 
 ## 12. Desktop app (Sprint 2)
 
+- [x] `tovi_core::node::Node`: one engine for the CLI, desktop and (later) mobile apps: identity, store, endpoint, pairing, inbox, background accept loop, events, user approvals with a 60 s timeout; the CLI now runs on it
 - [ ] Tauri 2 + React + TypeScript scaffold using `tovi-core`
 - [ ] Device list, QR display with expiry countdown
 - [ ] Incoming-transfer approval prompt
