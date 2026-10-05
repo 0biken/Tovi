@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "core/tovi-core",
-    "core/tovi-cli"
+    "core/tovi-cli",
+    "apps/desktop/src-tauri"
 ]
 resolver = "2"
