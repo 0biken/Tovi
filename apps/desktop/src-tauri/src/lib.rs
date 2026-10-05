@@ -1,7 +1,6 @@
 mod commands;
 
-use commands::{discovery, pairing, transfer, settings};
-use tauri::Manager;
+use commands::{discovery, pairing, settings, transfer};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {

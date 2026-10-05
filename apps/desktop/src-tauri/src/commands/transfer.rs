@@ -5,16 +5,16 @@ pub struct TransferRecord {
     pub id: String,
     pub file_name: String,
     pub file_size: u64,
-    pub direction: String,  // "sent" | "received"
+    pub direction: String, // "sent" | "received"
     pub device_name: String,
-    pub status: String,     // "completed" | "failed" | "in_progress"
-    pub created_at: u64,    // Unix timestamp
+    pub status: String,  // "completed" | "failed" | "in_progress"
+    pub created_at: u64, // Unix timestamp
 }
 
 /// Send a file to a paired device.
 #[tauri::command]
 pub async fn send_file(
-    app: tauri::AppHandle,
+    _app: tauri::AppHandle,
     device_id: String,
     path: String,
 ) -> Result<(), String> {

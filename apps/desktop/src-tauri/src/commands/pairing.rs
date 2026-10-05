@@ -1,3 +1,4 @@
+use base64::Engine;
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -8,8 +9,8 @@ pub struct LocalIdInfo {
 
 #[derive(Serialize)]
 pub struct QrPayload {
-    pub payload: String,   // base64-encoded QR content string
-    pub expires_at: u64,   // Unix timestamp (seconds)
+    pub payload: String, // base64-encoded QR content string
+    pub expires_at: u64, // Unix timestamp (seconds)
 }
 
 /// Returns this device's public identity (device_id and name).
@@ -40,7 +41,10 @@ pub async fn generate_qr() -> Result<QrPayload, String> {
     );
     let payload = base64::engine::general_purpose::STANDARD.encode(raw_payload.as_bytes());
 
-    Ok(QrPayload { payload, expires_at })
+    Ok(QrPayload {
+        payload,
+        expires_at,
+    })
 }
 
 /// Called by the frontend with a scanned QR code string to complete pairing.
