@@ -41,6 +41,9 @@ pub const CLOCK_SKEW_ALLOWANCE: Duration = Duration::from_secs(120);
 const URI_PREFIX: &str = "tovi://pair/";
 const CODE_VERSION: u8 = 1;
 const MAX_ENDPOINTS: usize = 8;
+/// Most pairing sessions open at once; opening another closes the oldest, so
+/// repeatedly refreshing a QR code can't pile up live secrets
+pub const MAX_OPEN_SESSIONS: usize = 8;
 const PROOF_CONTEXT: &[u8] = b"TOVI-PAIR-v1";
 const EXPORTER_LABEL: &[u8] = b"EXPORTER-TOVI-PAIR-v1";
 
@@ -192,11 +195,16 @@ impl PairingManager {
         let mut secret = [0u8; 32];
         OsRng.fill_bytes(&mut secret);
         let expires_at = unix_now() + lifetime.as_secs();
-        self.sessions.lock().unwrap().push(Session {
+        let mut sessions = self.sessions.lock().unwrap();
+        sessions.push(Session {
             secret,
             expires_at,
             failed_attempts: 0,
         });
+        if sessions.len() > MAX_OPEN_SESSIONS {
+            sessions.remove(0);
+        }
+        drop(sessions);
         PairingCode {
             desktop_key: self.desktop_key,
             secret,
@@ -589,6 +597,25 @@ mod tests {
         assert!(!manager.verify_and_consume(proof.as_bytes(), &[1; 32], &other_phone));
         // The genuine one still works
         assert!(manager.verify_and_consume(proof.as_bytes(), &[1; 32], &phone));
+    }
+
+    #[test]
+    fn opening_too_many_sessions_closes_the_oldest() {
+        let desktop = DeviceIdentity::generate_new();
+        let phone = DeviceIdentity::generate_new().device_id();
+        let manager = PairingManager::new(desktop.public_key(), Arc::new(MemoryTrustStore::new()));
+        let first = manager.start_session(vec![LOCALHOST]);
+        let codes: Vec<_> = (0..MAX_OPEN_SESSIONS)
+            .map(|_| manager.start_session(vec![LOCALHOST]))
+            .collect();
+
+        let proof_for = |code: &PairingCode| {
+            pairing_proof(&code.secret, &[1; 32], &phone, &desktop.device_id())
+        };
+        // The oldest code no longer works; the newest still does
+        assert!(!manager.verify_and_consume(proof_for(&first).as_bytes(), &[1; 32], &phone));
+        let newest = codes.last().unwrap();
+        assert!(manager.verify_and_consume(proof_for(newest).as_bytes(), &[1; 32], &phone));
     }
 
     #[test]

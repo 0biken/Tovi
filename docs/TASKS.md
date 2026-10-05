@@ -144,6 +144,7 @@ Decisions are recorded in [`architecture/decisions.md`](architecture/decisions.m
 
 ## 12. Desktop app (Sprint 2)
 
+- [x] `tovi_core::node::Node`: one engine for the CLI, desktop and (later) mobile apps: identity, store, endpoint, pairing, inbox, background accept loop, events, user approvals with a 60 s timeout; the CLI now runs on it
 - [x] Tauri 2 + React + TypeScript scaffold: screens, command stubs, builds, lints and launches (`pnpm tauri dev`); CI job for it (Linux/Windows/macOS)
 - [x] Placeholder app icon (`● ◇ ●`) generated from `src-tauri/icons/source.png`; capabilities file limits the window to core + file-open dialog
 - [ ] App-wide state started at launch: identity, `Store`, `QuicEndpoint`, `PairingManager`, `Inbox` (nothing is connected to the core yet)

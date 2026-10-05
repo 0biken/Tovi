@@ -113,6 +113,20 @@ pub struct TransferRecord {
     pub finished_at: Option<u64>,
 }
 
+/// A paired device with what the store knows about reaching it
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceDetails {
+    pub device: TrustedDevice,
+    /// Unix seconds
+    pub paired_at: u64,
+    pub last_seen: Option<u64>,
+    /// Best first
+    pub addresses: Vec<SocketAddr>,
+}
+
+/// Addresses kept per device
+const MAX_DEVICE_ADDRESSES: usize = 8;
+
 /// A received file the store knows was saved
 #[derive(Debug, Clone)]
 pub struct CompletedReceive {
@@ -208,6 +222,57 @@ impl Store {
             .split(',')
             .filter_map(|a| a.parse().ok())
             .collect())
+    }
+
+    /// Put `address` first in a device's address list (the device was just
+    /// reached there), keeping the others as fallbacks
+    pub fn remember_address(&self, id: &DeviceId, address: SocketAddr) -> Result<()> {
+        let mut addresses = vec![address];
+        addresses.extend(
+            self.device_addresses(id)?
+                .into_iter()
+                .filter(|a| *a != address),
+        );
+        addresses.truncate(MAX_DEVICE_ADDRESSES);
+        self.set_device_addresses(id, &addresses)
+    }
+
+    /// Every paired device with when it paired, was last seen, and its addresses
+    pub fn device_details(&self) -> Result<Vec<DeviceDetails>> {
+        let rows = self.with_conn(|c| {
+            let mut stmt = c.prepare(
+                "SELECT id, name, platform, paired_at, last_seen, addresses
+                 FROM devices ORDER BY paired_at, rowid",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, Vec<u8>>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, Option<i64>>(4)?,
+                    r.get::<_, String>(5)?,
+                ))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        })?;
+        rows.into_iter()
+            .map(|(id, name, platform, paired_at, last_seen, addresses)| {
+                Ok(DeviceDetails {
+                    device: TrustedDevice {
+                        id: DeviceId::try_from(id.as_slice())?,
+                        name,
+                        platform,
+                    },
+                    paired_at: u64::try_from(paired_at).unwrap_or(0),
+                    last_seen: last_seen.and_then(|t| u64::try_from(t).ok()),
+                    addresses: addresses
+                        .split(',')
+                        .filter_map(|a| a.parse().ok())
+                        .collect(),
+                })
+            })
+            .collect()
     }
 
     /// Note that a trusted device just connected
@@ -674,6 +739,47 @@ mod tests {
         assert!(store.remove(&phone.id).unwrap());
         assert!(!store.is_trusted(&phone.id));
         assert!(!store.remove(&phone.id).unwrap());
+    }
+
+    #[test]
+    fn remembered_address_goes_first_without_duplicates() {
+        let store = Store::open_in_memory().unwrap();
+        let phone = device("Pixel");
+        store.add(phone.clone()).unwrap();
+        let a: SocketAddr = "192.168.1.20:48210".parse().unwrap();
+        let b: SocketAddr = "192.168.1.31:50000".parse().unwrap();
+
+        store.remember_address(&phone.id, a).unwrap();
+        store.remember_address(&phone.id, b).unwrap();
+        store.remember_address(&phone.id, a).unwrap();
+        assert_eq!(store.device_addresses(&phone.id).unwrap(), vec![a, b]);
+
+        for port in 1..=20 {
+            store
+                .remember_address(&phone.id, SocketAddr::new(a.ip(), port))
+                .unwrap();
+        }
+        assert_eq!(
+            store.device_addresses(&phone.id).unwrap().len(),
+            MAX_DEVICE_ADDRESSES
+        );
+    }
+
+    #[test]
+    fn device_details_include_last_seen_and_addresses() {
+        let store = Store::open_in_memory().unwrap();
+        let phone = device("Pixel");
+        store.add(phone.clone()).unwrap();
+        let addr: SocketAddr = "10.0.0.5:48210".parse().unwrap();
+        store.set_device_addresses(&phone.id, &[addr]).unwrap();
+        store.touch_device(&phone.id).unwrap();
+
+        let details = store.device_details().unwrap();
+        assert_eq!(details.len(), 1);
+        assert_eq!(details[0].device, phone);
+        assert_eq!(details[0].addresses, vec![addr]);
+        assert!(details[0].paired_at > 0);
+        assert!(details[0].last_seen.is_some());
     }
 
     #[test]
