@@ -1,9 +1,11 @@
 import { NavLink, Outlet } from "react-router-dom";
+import Prompts from "./Prompts";
 
 const navItems = [
-  { to: "/",        label: "Devices",  icon: "📡" },
-  { to: "/pair",    label: "Pair",     icon: "📷" },
-  { to: "/history", label: "History",  icon: "📋" },
+  { to: "/", label: "Devices", icon: "📡" },
+  { to: "/pair", label: "Pair", icon: "📷" },
+  { to: "/history", label: "History", icon: "📋" },
+  { to: "/settings", label: "Settings", icon: "⚙️" },
 ];
 
 export default function Layout() {
@@ -19,6 +21,7 @@ export default function Layout() {
               to={item.to}
               end={item.to === "/"}
               title={item.label}
+              aria-label={item.label}
               className={({ isActive }) =>
                 `flex h-10 w-10 items-center justify-center rounded-lg text-lg transition-colors ${
                   isActive
@@ -37,6 +40,8 @@ export default function Layout() {
       <main className="flex-1 overflow-y-auto p-6">
         <Outlet />
       </main>
+
+      <Prompts />
     </div>
   );
 }
