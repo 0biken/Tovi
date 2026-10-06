@@ -329,6 +329,14 @@ async fn receive_folder_change_applies_and_persists() {
     assert_eq!(path.unwrap(), new_dir.join("song.flac"));
     assert_eq!(fs::read(new_dir.join("song.flac")).unwrap(), data);
 
+    // Relative paths are refused rather than resolved against the working folder
+    let err = desktop
+        .node
+        .set_receive_dir(Path::new("relative/inbox"))
+        .unwrap_err();
+    assert!(err.to_string().contains("full path"), "{err:#}");
+    assert_eq!(desktop.node.receive_dir(), new_dir);
+
     // The choice survives a restart
     let dir = desktop.dir.clone();
     desktop.node.shutdown().await;

@@ -79,11 +79,10 @@ Notes:
   left off. If it gives up, running the same `send` again resumes too. The partial file waits in
   the receive folder as `<name>.<id>.tovi.part` with a `.tovi.state` file beside it.
 
-## Desktop app (work in progress)
+## Desktop app
 
 Needs [Node.js](https://nodejs.org) 22+, [pnpm](https://pnpm.io), and on Linux the
-[Tauri system libraries](https://v2.tauri.app/start/prerequisites/). The screens exist, but most
-actions are still placeholders and are not connected to the core yet.
+[Tauri system libraries](https://v2.tauri.app/start/prerequisites/).
 
 ```bash
 cd apps/desktop
@@ -91,5 +90,18 @@ pnpm install
 pnpm tauri dev
 ```
 
-To compile or lint the Rust side (`cargo clippy -p tovi-desktop`), build the frontend once first
-with `pnpm build`; the Rust build embeds `apps/desktop/dist`.
+The app shows a pairing QR code (Pair), your paired devices (Devices), transfers in both
+directions (History) and Settings (receive folder, auto-accept). It runs the same engine as the
+CLI, so the CLI makes a handy second device for testing: paste the app's code into
+`tovi-cli send <file> "<code>"`, or paste a `tovi-cli listen` code into the app's
+"Pair with a code" box.
+
+Notes:
+
+- The app has its own identity and data, separate from the CLI's (`%APPDATA%\io.tovi.desktop` on
+  Windows). Set `TOVI_DATA_DIR` to use another folder, e.g. to run two copies on one PC.
+- Files from paired devices are accepted automatically; turn that off in Settings to be asked each
+  time. Pairing a new device always asks.
+- Closing the window stops receiving; there is no tray mode yet.
+- To compile or lint the Rust side (`cargo clippy -p tovi-desktop`), build the frontend once first
+  with `pnpm build`; the Rust build embeds `apps/desktop/dist`.

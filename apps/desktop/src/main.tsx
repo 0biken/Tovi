@@ -7,6 +7,7 @@ import DeviceListPage from "./pages/DeviceListPage";
 import SendPage from "./pages/SendPage";
 import QrPairingPage from "./pages/QrPairingPage";
 import HistoryPage from "./pages/HistoryPage";
+import SettingsPage from "./pages/SettingsPage";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
@@ -17,6 +18,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
           <Route path="send/:deviceId" element={<SendPage />} />
           <Route path="pair" element={<QrPairingPage />} />
           <Route path="history" element={<HistoryPage />} />
+          <Route path="settings" element={<SettingsPage />} />
         </Route>
       </Routes>
     </BrowserRouter>
