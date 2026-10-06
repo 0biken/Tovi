@@ -9,6 +9,7 @@ for the design and decisions, and [`docs/TASKS.md`](docs/TASKS.md) for progress.
 ```text
 core/tovi-core   Rust core: identity, QUIC transport, pairing, protocol
 core/tovi-cli    Headless spike CLI
+apps/desktop     Desktop app (Tauri 2 + React), work in progress
 docs/            PRD, architecture, decisions, task list
 ```
 
@@ -17,9 +18,11 @@ docs/            PRD, architecture, decisions, task list
 Requires the stable Rust toolchain (on Windows, also the Visual Studio C++ Build Tools).
 
 ```bash
-cargo test --workspace
+cargo test
 cargo build -p tovi-cli
 ```
+
+Plain `cargo` commands cover the core and the CLI. The desktop app is built separately (see below).
 
 ## Try it on two machines
 
@@ -75,3 +78,18 @@ Notes:
 - If the connection drops mid-transfer, `send` reconnects for up to 2 minutes and resumes where it
   left off. If it gives up, running the same `send` again resumes too. The partial file waits in
   the receive folder as `<name>.<id>.tovi.part` with a `.tovi.state` file beside it.
+
+## Desktop app (work in progress)
+
+Needs [Node.js](https://nodejs.org) 22+, [pnpm](https://pnpm.io), and on Linux the
+[Tauri system libraries](https://v2.tauri.app/start/prerequisites/). The screens exist, but most
+actions are still placeholders and are not connected to the core yet.
+
+```bash
+cd apps/desktop
+pnpm install
+pnpm tauri dev
+```
+
+To compile or lint the Rust side (`cargo clippy -p tovi-desktop`), build the frontend once first
+with `pnpm build`; the Rust build embeds `apps/desktop/dist`.
