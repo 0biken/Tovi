@@ -1,5 +1,6 @@
 pub mod discovery;
 pub mod identity;
+pub mod node;
 pub mod pairing;
 pub mod protocol;
 pub mod storage;

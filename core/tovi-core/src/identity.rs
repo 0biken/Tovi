@@ -24,6 +24,24 @@ impl DeviceId {
     }
 }
 
+impl std::str::FromStr for DeviceId {
+    type Err = anyhow::Error;
+
+    /// Parses the 64-character hex form produced by `Display`
+    fn from_str(s: &str) -> Result<Self> {
+        let s = s.trim();
+        anyhow::ensure!(
+            s.len() == 64 && s.is_ascii(),
+            "device ID must be 64 hex characters"
+        );
+        let bytes = (0..32)
+            .map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16))
+            .collect::<std::result::Result<Vec<u8>, _>>()
+            .context("device ID must be 64 hex characters")?;
+        Self::try_from(bytes.as_slice())
+    }
+}
+
 impl TryFrom<&[u8]> for DeviceId {
     type Error = anyhow::Error;
 
@@ -183,6 +201,19 @@ mod tests {
         let identity = DeviceIdentity::generate_new();
         let restored = DeviceIdentity::from_bytes(&identity.to_bytes()).unwrap();
         assert_eq!(identity.device_id(), restored.device_id());
+    }
+
+    #[test]
+    fn device_id_parses_from_its_hex_form() {
+        let id = DeviceIdentity::generate_new().device_id();
+        assert_eq!(id.to_string().parse::<DeviceId>().unwrap(), id);
+        assert_eq!(
+            id.to_string().to_uppercase().parse::<DeviceId>().unwrap(),
+            id
+        );
+        assert!("abc".parse::<DeviceId>().is_err());
+        assert!("zz".repeat(32).parse::<DeviceId>().is_err());
+        assert!("é".repeat(32).parse::<DeviceId>().is_err()); // 64 bytes, not ASCII
     }
 
     #[test]
