@@ -1,6 +1,14 @@
 [workspace]
 members = [
     "core/tovi-core",
+    "core/tovi-cli",
+    "apps/desktop/src-tauri"
+]
+# Plain `cargo build` / `cargo test` cover the core and CLI only. The desktop app
+# needs its frontend built first (`pnpm build` in apps/desktop) and, on Linux,
+# the Tauri system libraries; use `-p tovi-desktop` or `--workspace` to include it.
+default-members = [
+    "core/tovi-core",
     "core/tovi-cli"
 ]
 resolver = "2"

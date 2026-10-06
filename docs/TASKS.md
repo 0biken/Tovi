@@ -145,8 +145,16 @@ Decisions are recorded in [`architecture/decisions.md`](architecture/decisions.m
 ## 12. Desktop app (Sprint 2)
 
 - [x] `tovi_core::node::Node`: one engine for the CLI, desktop and (later) mobile apps: identity, store, endpoint, pairing, inbox, background accept loop, events, user approvals with a 60 s timeout; the CLI now runs on it
-- [ ] Tauri 2 + React + TypeScript scaffold using `tovi-core`
-- [ ] Device list, QR display with expiry countdown
+- [x] Tauri 2 + React + TypeScript scaffold: screens, command stubs, builds, lints and launches (`pnpm tauri dev`); CI job for it (Linux/Windows/macOS)
+- [x] Placeholder app icon (`● ◇ ●`) generated from `src-tauri/icons/source.png`; capabilities file limits the window to core + file-open dialog
+- [ ] App-wide state started at launch: identity, `Store`, `QuicEndpoint`, `PairingManager`, `Inbox` (nothing is connected to the core yet)
+- [ ] Real pairing QR: `PairingManager::start_session` → `tovi://pair/…` (the page shows a placeholder JSON payload)
+- [ ] Device list from paired devices in `Store` (the mDNS list would show opaque IDs, not names, and busy-waits); online status via discovery (§4)
+- [ ] `send_file` wired to `send_with_resume` with `transfer:progress` events; history from `Store`; receive folder in settings
+- [ ] Drag-and-drop via Tauri's drag-drop event (HTML `File.path` does not exist in Tauri 2; a drop currently sends only the file name)
+- [ ] Production CSP (currently `null`); remove the unused shell plugin
+- [ ] Replace the placeholder icon with the real logo
+- [ ] Device list, QR display with expiry countdown (screens exist; see wiring items above)
 - [ ] Incoming-transfer approval prompt
 - [ ] Drag-and-drop send
 - [ ] Transfer progress + history
