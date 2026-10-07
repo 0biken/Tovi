@@ -567,5 +567,5 @@ fn describe(device: &TrustedDevice) -> String {
 
 /// First 8 hex characters of a device ID, for display
 fn short(id: &DeviceId) -> String {
-    id.to_string()[..8].to_string()
+    id.short()
 }

@@ -8,7 +8,6 @@ pub mod pairing;
 pub mod settings;
 pub mod transfer;
 
-use std::fmt::Write as _;
 use tovi_core::identity::DeviceId;
 use tovi_core::storage::Direction;
 use tovi_core::transfer::TransferId;
@@ -26,20 +25,13 @@ pub fn parse_device_id(id: &str) -> CommandResult<DeviceId> {
 
 /// First 8 hex characters of a device ID, for display
 pub fn short(id: &DeviceId) -> String {
-    id.to_string()[..8].to_string()
+    id.short()
 }
 
 pub fn transfer_id_hex(id: &TransferId) -> String {
-    let mut hex = String::with_capacity(32);
-    for b in id {
-        let _ = write!(hex, "{b:02x}");
-    }
-    hex
+    tovi_core::transfer::transfer_id_hex(id)
 }
 
 pub fn direction_str(direction: Direction) -> &'static str {
-    match direction {
-        Direction::Sent => "sent",
-        Direction::Received => "received",
-    }
+    direction.as_str()
 }

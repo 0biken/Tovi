@@ -133,7 +133,7 @@ Decisions are recorded in [`architecture/decisions.md`](architecture/decisions.m
 
 ## 11. Android client (Sprint 3)
 
-- [ ] UniFFI bindings for `tovi-core`
+- [x] UniFFI bindings for `tovi-core` (`core/tovi-ffi`: `ToviNode`, `EventListener`; host tests, Android build untested)
 - [ ] Kotlin + Compose app skeleton
 - [ ] NSD discovery adapter + `MulticastLock`
 - [ ] QR scanner (CameraX + ML Kit)

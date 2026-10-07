@@ -2,6 +2,7 @@
 members = [
     "core/tovi-core",
     "core/tovi-cli",
+    "core/tovi-ffi",
     "apps/desktop/src-tauri"
 ]
 # Plain `cargo build` / `cargo test` cover the core and CLI only. The desktop app
@@ -9,6 +10,7 @@ members = [
 # the Tauri system libraries; use `-p tovi-desktop` or `--workspace` to include it.
 default-members = [
     "core/tovi-core",
-    "core/tovi-cli"
+    "core/tovi-cli",
+    "core/tovi-ffi"
 ]
 resolver = "2"
