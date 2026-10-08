@@ -305,6 +305,41 @@ async fn forgotten_device_is_refused_without_retrying() {
     phone.stop().await;
 }
 
+/// The phone forgot the desktop, but the desktop still trusts the phone: the
+/// phone opens with HELLO, not a file, and must be able to pair again
+#[tokio::test]
+async fn trusted_device_can_pair_again_after_forgetting() {
+    let mut desktop = start("Desk").await;
+    let phone = start("Phone").await;
+    pair(&mut desktop, &phone, true).await.unwrap();
+    assert!(phone.node.forget(&desktop.node.device_id()).unwrap());
+    assert!(phone.node.devices().unwrap().is_empty());
+
+    let paired = pair(&mut desktop, &phone, true).await.unwrap();
+    assert_eq!(paired.id, desktop.node.device_id());
+    let desk_sees = desktop.node.devices().unwrap();
+    assert_eq!(desk_sees.len(), 1, "still one entry for the phone");
+    assert_eq!(desk_sees[0].device.id, phone.node.device_id());
+
+    let (source, data) = phone.file("again.bin", 64 * 1024 + 3);
+    let report = phone
+        .node
+        .send_file(&desktop.node.device_id(), &source)
+        .await
+        .unwrap();
+    assert_eq!(report.file_hash, blake3::hash(&data));
+    let outcome = desktop
+        .wait_for(|e| finished_outcome(e, Direction::Received))
+        .await;
+    let TransferOutcome::Completed { path, .. } = outcome else {
+        panic!("receive did not complete: {outcome:?}")
+    };
+    assert_eq!(fs::read(path.unwrap()).unwrap(), data);
+
+    desktop.stop().await;
+    phone.stop().await;
+}
+
 #[tokio::test]
 async fn receive_folder_change_applies_and_persists() {
     let mut desktop = start("Desk").await;
