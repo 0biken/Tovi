@@ -274,8 +274,26 @@ where
     F: FnOnce(PairingRequest) -> Fut,
     Fut: Future<Output = bool>,
 {
-    let (mut send, mut recv) = conn.accept_bi().await?;
+    let (send, mut recv) = conn.accept_bi().await?;
     let their_hello = protocol::read_hello(&mut recv).await?;
+    respond_to_hello(conn, send, recv, their_hello, manager, our_hello, approve).await
+}
+
+/// Like [`respond`], for a stream whose first message (the phone's `HELLO`)
+/// the caller has already read
+pub async fn respond_to_hello<F, Fut>(
+    conn: &PeerConnection,
+    mut send: quinn::SendStream,
+    mut recv: quinn::RecvStream,
+    their_hello: Hello,
+    manager: &PairingManager,
+    our_hello: &Hello,
+    approve: F,
+) -> Result<TrustedDevice>
+where
+    F: FnOnce(PairingRequest) -> Fut,
+    Fut: Future<Output = bool>,
+{
     protocol::write_message(&mut send, &Message::Hello(our_hello.clone())).await?;
     protocol::negotiate(our_hello, &their_hello)?;
 

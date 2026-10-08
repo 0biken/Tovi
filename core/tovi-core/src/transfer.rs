@@ -658,19 +658,37 @@ impl Inbox {
         F: FnOnce(TransferOffer) -> Fut,
         Fut: Future<Output = bool>,
     {
-        let Some((mut control_send, mut control_recv)) = conn.next_bi().await? else {
+        let Some((control_send, mut control_recv)) = conn.next_bi().await? else {
             return Ok(None);
         };
         let offer = match protocol::read_message(&mut control_recv).await? {
             Message::TransferOffer(offer) => offer,
             other => bail!("expected TRANSFER_OFFER, got {}", other.kind()),
         };
+        self.receive_offer(conn, control_send, control_recv, offer, approve, progress)
+            .await
+            .map(Some)
+    }
+
+    /// Like [`Self::receive_next`], for a control stream whose first message
+    /// (`offer`) the caller has already read
+    pub async fn receive_offer<F, Fut>(
+        &self,
+        conn: &PeerConnection,
+        mut control_send: SendStream,
+        mut control_recv: RecvStream,
+        offer: TransferOffer,
+        approve: F,
+        progress: impl Fn(Progress),
+    ) -> Result<ReceivedFile>
+    where
+        F: FnOnce(TransferOffer) -> Fut,
+        Fut: Future<Output = bool>,
+    {
         let id = offer.transfer_id;
 
         if let Some(done) = self.already_received(&offer, conn.peer_id()) {
-            return confirm_completed(&mut control_send, &mut control_recv, &offer, done)
-                .await
-                .map(Some);
+            return confirm_completed(&mut control_send, &mut control_recv, &offer, done).await;
         }
         if let Err(e) = check_offer(&offer, &self.dir) {
             refuse(&mut control_send, id, &e.to_string()).await?;
@@ -759,7 +777,7 @@ impl Inbox {
         };
         // Best effort: the sender may already be gone
         let _ = protocol::finish_with(&mut control_send, &Message::TransferResult(result)).await;
-        outcome.map(Some)
+        outcome
     }
 
     /// A transfer this inbox already saved, re-offered by the same sender

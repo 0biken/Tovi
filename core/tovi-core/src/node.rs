@@ -13,14 +13,15 @@
 
 use crate::identity::{DeviceId, DeviceIdentity, FileKeyStore};
 use crate::pairing::{self, PairingCode, PairingManager, PairingRequest};
-use crate::protocol::{Hello, TransferOffer};
+use crate::protocol::{self, Hello, Message, TransferOffer};
 use crate::storage::{DeviceDetails, Direction, Store, TransferRecord};
 use crate::transfer::{
     self, ConnectionLost, Inbox, OutgoingTransfer, Progress, SendOptions, TransferId,
 };
 use crate::transport::{candidate_addresses, PeerConnection, QuicEndpoint};
 use crate::trust::{TrustStore, TrustedDevice};
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
+use quinn::{RecvStream, SendStream};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -572,9 +573,12 @@ async fn accept_loop(inner: Arc<Inner>) {
     }
 }
 
-/// Untrusted devices may only pair; trusted ones may send files
+/// Each stream is routed on its first message: `HELLO` starts pairing, a
+/// `TRANSFER_OFFER` sends a file. Untrusted devices may only pair; trusted
+/// ones may send files, and may also pair again (they scanned a new code,
+/// e.g. after forgetting this device on their side).
 async fn handle_connection(inner: Arc<Inner>, conn: PeerConnection) {
-    let known = match inner.store.get(conn.peer_id()) {
+    let mut device = match inner.store.get(conn.peer_id()) {
         Ok(known) => known,
         Err(e) => {
             tracing::error!("could not read paired devices: {e:#}");
@@ -582,37 +586,107 @@ async fn handle_connection(inner: Arc<Inner>, conn: PeerConnection) {
             return;
         }
     };
-    let (device, newly_paired) = match known {
-        Some(device) => (device, false),
-        None => {
-            let hello = Hello::new(inner.name.clone());
-            let inner_ref = &inner;
-            let ask = move |request: PairingRequest| async move {
-                if inner_ref.auto_approve_pairing {
-                    return true;
+    if let Some(device) = &device {
+        remember_peer(&inner, &conn, device);
+    }
+
+    loop {
+        let first = match conn.next_bi().await {
+            Ok(Some((send, mut recv))) => protocol::read_message(&mut recv)
+                .await
+                .map(|message| (send, recv, message)),
+            Ok(None) => return,
+            Err(e) => Err(e),
+        };
+        let (send, recv, message) = match first {
+            Ok(first) => first,
+            Err(e) if device.is_none() => return pairing_failed(&inner, &conn, e),
+            Err(e) => {
+                tracing::warn!("receive from {} failed: {e:#}", conn.peer_id());
+                if conn.is_closed() {
+                    return;
                 }
-                inner_ref
-                    .ask(|request_id| Event::PairingRequested {
-                        request_id,
-                        request,
-                    })
-                    .await
-            };
-            match pairing::respond(&conn, &inner.manager, &hello, ask).await {
-                Ok(device) => (device, true),
-                Err(e) => {
+                continue;
+            }
+        };
+        match message {
+            Message::Hello(hello) => match pair_on(&inner, &conn, send, recv, hello).await {
+                Some(paired) => device = Some(paired),
+                None => return,
+            },
+            Message::TransferOffer(offer) => {
+                let Some(device) = &device else {
                     // Not paired: shut the door so the device doesn't retry
-                    conn.refuse();
-                    inner.emit(Event::PairingFailed {
-                        device_id: *conn.peer_id(),
-                        error: format!("{e:#}"),
-                    });
+                    let e = anyhow!("an unpaired device tried to send a file");
+                    return pairing_failed(&inner, &conn, e);
+                };
+                if !receive_one(&inner, &conn, device, send, recv, offer).await {
                     return;
                 }
             }
+            other => {
+                let e = anyhow!("expected HELLO or TRANSFER_OFFER, got {}", other.kind());
+                if device.is_none() {
+                    return pairing_failed(&inner, &conn, e);
+                }
+                tracing::warn!("receive from {} failed: {e:#}", conn.peer_id());
+            }
         }
+    }
+}
+
+/// Answer a `HELLO` with the pairing exchange; still needs a valid code and
+/// the user's approval, also from a device that is already trusted. Returns
+/// the (updated) trusted device, or `None` after refusing the connection.
+async fn pair_on(
+    inner: &Arc<Inner>,
+    conn: &PeerConnection,
+    send: SendStream,
+    recv: RecvStream,
+    their_hello: Hello,
+) -> Option<TrustedDevice> {
+    let hello = Hello::new(inner.name.clone());
+    let ask = |request: PairingRequest| async move {
+        if inner.auto_approve_pairing {
+            return true;
+        }
+        inner
+            .ask(|request_id| Event::PairingRequested {
+                request_id,
+                request,
+            })
+            .await
     };
-    // Their endpoint also listens, so this is where to reach them next time
+    let result =
+        pairing::respond_to_hello(conn, send, recv, their_hello, &inner.manager, &hello, ask).await;
+    match result {
+        Ok(device) => {
+            remember_peer(inner, conn, &device);
+            // Only now: once `Paired` is out, the app may send to this device at once
+            inner.emit(Event::Paired {
+                device: device.clone(),
+            });
+            inner.emit(Event::DevicesChanged);
+            Some(device)
+        }
+        Err(e) => {
+            pairing_failed(inner, conn, e);
+            None
+        }
+    }
+}
+
+/// Not paired: shut the door so the device doesn't retry, and say why
+fn pairing_failed(inner: &Inner, conn: &PeerConnection, error: anyhow::Error) {
+    conn.refuse();
+    inner.emit(Event::PairingFailed {
+        device_id: *conn.peer_id(),
+        error: format!("{error:#}"),
+    });
+}
+
+/// Their endpoint also listens, so this is where to reach them next time
+fn remember_peer(inner: &Inner, conn: &PeerConnection, device: &TrustedDevice) {
     if let Err(e) = inner.store.touch_device(&device.id).and_then(|()| {
         inner
             .store
@@ -620,19 +694,18 @@ async fn handle_connection(inner: Arc<Inner>, conn: PeerConnection) {
     }) {
         tracing::warn!("could not update {}: {e:#}", device.name);
     }
-    // Only now: once `Paired` is out, the app may send to this device at once
-    if newly_paired {
-        inner.emit(Event::Paired {
-            device: device.clone(),
-        });
-        inner.emit(Event::DevicesChanged);
-    }
-
-    while receive_one(&inner, &conn, &device).await {}
 }
 
-/// Receive one file on `conn`. Returns whether to wait for another.
-async fn receive_one(inner: &Arc<Inner>, conn: &PeerConnection, device: &TrustedDevice) -> bool {
+/// Receive the file `offer` describes, on the stream it arrived on. Returns
+/// whether to wait for another.
+async fn receive_one(
+    inner: &Arc<Inner>,
+    conn: &PeerConnection,
+    device: &TrustedDevice,
+    send: SendStream,
+    recv: RecvStream,
+    offer: TransferOffer,
+) -> bool {
     let started = Instant::now();
     // Filled in once the offer arrives, so later events can name the transfer
     let current: Mutex<Option<(TransferId, String)>> = Mutex::new(None);
@@ -672,11 +745,13 @@ async fn receive_one(inner: &Arc<Inner>, conn: &PeerConnection, device: &Trusted
         }
     };
 
-    let result = inner.inbox().receive_next(conn, approve, on_progress).await;
+    let result = inner
+        .inbox()
+        .receive_offer(conn, send, recv, offer, approve, on_progress)
+        .await;
 
     let (outcome, keep_going, id, file_name) = match result {
-        Ok(None) => return false,
-        Ok(Some(file)) => {
+        Ok(file) => {
             let name = file
                 .path
                 .file_name()
