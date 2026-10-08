@@ -182,6 +182,13 @@ dependencies {
   implementation(libs.jna) { artifact { type = "aar" } }
   implementation(libs.kotlinx.coroutines.android)
 
+  // QR scanning: CameraX preview + ML Kit barcode analyzer
+  implementation(libs.androidx.camera.camera2)
+  implementation(libs.androidx.camera.lifecycle)
+  implementation(libs.androidx.camera.view)
+  implementation(libs.androidx.camera.mlkit.vision)
+  implementation(libs.mlkit.barcode.scanning)
+
   // Local tests: jUnit, coroutines, Android runner
   testImplementation(libs.junit)
   testImplementation(libs.kotlinx.coroutines.test)

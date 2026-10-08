@@ -93,9 +93,9 @@ class NodeRepository(private val context: Context, private val scope: CoroutineS
 
   // ------------------------------------------------------------------ actions
 
-  /** Pair with the device whose `tovi://pair/...` code was scanned or pasted */
+  /** Pair with the device whose `tovi://pair/...` code was scanned or pasted. A failure is the caller's to show. */
   suspend fun pair(code: String): Result<Device> =
-    call { it.pair(code) }.onSuccess { reloadDevices() }
+    call(notify = false) { it.pair(code) }.onSuccess { reloadDevices() }
 
   /** Answer a [PendingRequest] */
   fun respond(requestId: ULong, allow: Boolean) {
@@ -156,15 +156,15 @@ class NodeRepository(private val context: Context, private val scope: CoroutineS
 
   /**
    * Run [block] against the node off the main thread. A [ToviException] is
-   * shown to the user and returned as a failure.
+   * logged, shown to the user if [notify], and returned as a failure.
    */
-  private suspend fun <T> call(block: suspend (ToviNode) -> T): Result<T> {
+  private suspend fun <T> call(notify: Boolean = true, block: suspend (ToviNode) -> T): Result<T> {
     val node = node.await()
     return try {
       Result.success(withContext(Dispatchers.IO) { block(node) })
     } catch (e: ToviException) {
       Log.w(TAG, "node call failed", e)
-      _notices.trySend(e.message ?: "Something went wrong")
+      if (notify) _notices.trySend(e.message ?: "Something went wrong")
       Result.failure(e)
     }
   }

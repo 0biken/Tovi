@@ -39,8 +39,37 @@ class AppViewModel(private val repository: NodeRepository, private val saved: Sa
   private val _pairState = MutableStateFlow<PairState>(PairState.Idle)
   val pairState: StateFlow<PairState> = _pairState.asStateFlow()
 
+  /** The Pair screen's code field */
+  val pairCode: StateFlow<String> = saved.getStateFlow(PAIR_CODE, "")
+
+  /** The code came from an opened link rather than the user, so they're warned before pairing */
+  val pairCodeFromLink: StateFlow<Boolean> = saved.getStateFlow(PAIR_CODE_FROM_LINK, false)
+
+  fun editPairCode(code: String) {
+    saved[PAIR_CODE] = code
+    saved[PAIR_CODE_FROM_LINK] = false
+  }
+
+  /** A `tovi://pair/...` link was opened: fill in the Pair screen, but don't pair yet */
+  fun openPairLink(link: String) {
+    resetPairing()
+    saved[PAIR_CODE] = link
+    saved[PAIR_CODE_FROM_LINK] = true
+  }
+
+  /** Last code tried, so a QR code still in view isn't retried every frame */
+  private var lastTried: String? = null
+
+  /** A code seen by the scanner: pair with it unless it's the one just tried */
+  fun scanned(code: String) {
+    if (code == lastTried || _pairState.value == PairState.Pairing) return
+    editPairCode(code)
+    pair(code)
+  }
+
   fun pair(code: String) {
     if (_pairState.value == PairState.Pairing) return
+    lastTried = code
     _pairState.value = PairState.Pairing
     viewModelScope.launch {
       _pairState.value =
@@ -50,8 +79,11 @@ class AppViewModel(private val repository: NodeRepository, private val saved: Sa
     }
   }
 
+  /** Start the Pair screen afresh */
   fun resetPairing() {
     _pairState.value = PairState.Idle
+    lastTried = null
+    editPairCode("")
   }
 
   fun respond(requestId: ULong, allow: Boolean) = repository.respond(requestId, allow)
@@ -82,6 +114,8 @@ class AppViewModel(private val repository: NodeRepository, private val saved: Sa
 
   companion object {
     private const val PICKING_FOR = "picking_for"
+    private const val PAIR_CODE = "pair_code"
+    private const val PAIR_CODE_FROM_LINK = "pair_code_from_link"
 
     val Factory = viewModelFactory {
       initializer { AppViewModel((this[APPLICATION_KEY] as ToviApp).repository, createSavedStateHandle()) }

@@ -6,6 +6,10 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
 
+    <!-- Scanning pairing QR codes; pasting a code works without a camera -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera.any" android:required="false" />
+
     <!-- No backup: the identity key must stay on this phone, or a restored
          copy elsewhere would be the same device to everyone it paired with -->
     <application
@@ -19,10 +23,19 @@
         android:theme="@style/Theme.TOVI">
         <activity
             android:name=".MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:launchMode="singleTop">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- tovi://pair/... links, e.g. a QR code scanned with the system camera.
+                 They only fill in the Pair screen; the user still taps Pair. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="tovi" android:host="pair" />
             </intent-filter>
         </activity>
     </application>

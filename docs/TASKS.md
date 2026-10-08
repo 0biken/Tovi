@@ -136,7 +136,7 @@ Decisions are recorded in [`architecture/decisions.md`](architecture/decisions.m
 - [x] UniFFI bindings for `tovi-core` (`core/tovi-ffi`: `ToviNode`, `EventListener`; host tests, Android build untested)
 - [x] Kotlin + Compose app skeleton (`apps/android`: pairing by pasted code, send via file picker, transfers, settings; tested on an Android 16 phone)
 - [ ] NSD discovery adapter + `MulticastLock`
-- [ ] QR scanner (CameraX + ML Kit)
+- [x] QR scanner (CameraX + ML Kit; `tovi://pair` links fill in the code but need a tap)
 - [ ] Share-sheet intent ("Share → TOVI")
 - [ ] Foreground service for active transfers; notifications
 - [ ] Permissions per API level (`NEARBY_WIFI_DEVICES` on 13+)

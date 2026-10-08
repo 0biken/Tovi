@@ -49,7 +49,12 @@ private val TABS =
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MainNavigation(viewModel: AppViewModel = viewModel(factory = AppViewModel.Factory)) {
+fun MainNavigation(
+  /** A `tovi://pair/...` link the app was opened with, not yet shown */
+  pairLink: String? = null,
+  onPairLinkShown: () -> Unit = {},
+  viewModel: AppViewModel = viewModel(factory = AppViewModel.Factory),
+) {
   val backStack = rememberNavBackStack(Devices)
   val current = backStack.lastOrNull()
 
@@ -60,6 +65,17 @@ fun MainNavigation(viewModel: AppViewModel = viewModel(factory = AppViewModel.Fa
   val autoAccept by viewModel.autoAccept.collectAsStateWithLifecycle()
   val receiveDir by viewModel.receiveDir.collectAsStateWithLifecycle()
   val pairState by viewModel.pairState.collectAsStateWithLifecycle()
+  val pairCode by viewModel.pairCode.collectAsStateWithLifecycle()
+  val pairCodeFromLink by viewModel.pairCodeFromLink.collectAsStateWithLifecycle()
+
+  LaunchedEffect(pairLink) {
+    if (pairLink != null) {
+      viewModel.openPairLink(pairLink)
+      backStack.showTab(Devices)
+      backStack.add(PairDevice)
+      onPairLinkShown()
+    }
+  }
 
   // Registered here rather than in a screen, so a result delivered to a
   // recreated activity (the app was killed while the picker was open) still lands
@@ -128,7 +144,15 @@ fun MainNavigation(viewModel: AppViewModel = viewModel(factory = AppViewModel.Fa
             )
           }
           entry<PairDevice> {
-            PairScreen(state = pairState, onPair = viewModel::pair, onPaired = { backStack.removeLastOrNull() })
+            PairScreen(
+              state = pairState,
+              code = pairCode,
+              codeFromLink = pairCodeFromLink,
+              onCodeChange = viewModel::editPairCode,
+              onScanned = viewModel::scanned,
+              onPair = viewModel::pair,
+              onPaired = { backStack.removeLastOrNull() },
+            )
           }
         },
     )
