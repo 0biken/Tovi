@@ -133,10 +133,10 @@ Decisions are recorded in [`architecture/decisions.md`](architecture/decisions.m
 
 ## 11. Android client (Sprint 3)
 
-- [ ] UniFFI bindings for `tovi-core`
-- [ ] Kotlin + Compose app skeleton
+- [x] UniFFI bindings for `tovi-core` (`core/tovi-ffi`: `ToviNode`, `EventListener`; host tests, Android build untested)
+- [x] Kotlin + Compose app skeleton (`apps/android`: pairing by pasted code, send via file picker, transfers, settings; tested on an Android 16 phone)
 - [ ] NSD discovery adapter + `MulticastLock`
-- [ ] QR scanner (CameraX + ML Kit)
+- [x] QR scanner (CameraX + ML Kit; `tovi://pair` links fill in the code but need a tap)
 - [ ] Share-sheet intent ("Share → TOVI")
 - [ ] Foreground service for active transfers; notifications
 - [ ] Permissions per API level (`NEARBY_WIFI_DEVICES` on 13+)
@@ -147,19 +147,21 @@ Decisions are recorded in [`architecture/decisions.md`](architecture/decisions.m
 - [x] `tovi_core::node::Node`: one engine for the CLI, desktop and (later) mobile apps: identity, store, endpoint, pairing, inbox, background accept loop, events, user approvals with a 60 s timeout; the CLI now runs on it
 - [x] Tauri 2 + React + TypeScript scaffold: screens, command stubs, builds, lints and launches (`pnpm tauri dev`); CI job for it (Linux/Windows/macOS)
 - [x] Placeholder app icon (`● ◇ ●`) generated from `src-tauri/icons/source.png`; capabilities file limits the window to core + file-open dialog
-- [ ] App-wide state started at launch: identity, `Store`, `QuicEndpoint`, `PairingManager`, `Inbox` (nothing is connected to the core yet)
-- [ ] Real pairing QR: `PairingManager::start_session` → `tovi://pair/…` (the page shows a placeholder JSON payload)
-- [ ] Device list from paired devices in `Store` (the mDNS list would show opaque IDs, not names, and busy-waits); online status via discovery (§4)
-- [ ] `send_file` wired to `send_with_resume` with `transfer:progress` events; history from `Store`; receive folder in settings
-- [ ] Drag-and-drop via Tauri's drag-drop event (HTML `File.path` does not exist in Tauri 2; a drop currently sends only the file name)
-- [ ] Production CSP (currently `null`); remove the unused shell plugin
+- [x] App-wide `Node` started at launch (own data folder, `TOVI_DATA_DIR` to override), events forwarded to the window, clean shutdown on exit
+- [x] Real pairing QR (`tovi://pair/…`) with countdown, copyable code, and "Pair with a code" box for pairing with another desktop or the CLI
+- [x] Device list from paired devices (name, platform, last seen, address); Forget with confirmation
+- [x] Pairing approval prompt (Allow / Cancel); incoming-file prompt when auto-accept is off; toasts for pairings and received files
+- [x] Send page: progress, speed, "Reconnecting…", several files in a row; resumes via `send_with_resume`
+- [x] History from the store; Retry / Resume for unfinished or failed sends
+- [x] Settings: receive folder (picker), auto-accept toggle (on by default), this device's name and ID
+- [x] Production CSP; unused shell plugin and mDNS command removed
+- [x] End-to-end test of the built app with the CLI as the other device (pair both ways, send both ways, prompt, forget, clean exit)
+- [x] Drag-and-drop via Tauri's webview drag-drop event (real file paths)
+- [ ] Test drag-and-drop and the file picker by hand (native OS interactions the automated run can't drive)
+- [ ] Online status for paired devices (needs discovery, §4)
 - [ ] Replace the placeholder icon with the real logo
-- [ ] Device list, QR display with expiry countdown (screens exist; see wiring items above)
-- [ ] Incoming-transfer approval prompt
-- [ ] Drag-and-drop send
-- [ ] Transfer progress + history
-- [ ] Settings: receive folder, trusted devices, auto-accept
-- [ ] Background/tray mode
+- [ ] Background/tray mode (closing the window currently stops receiving)
+- [ ] Single-instance guard (two copies would fight over the same data folder)
 
 ## 13. Hardening (Sprint 4)
 

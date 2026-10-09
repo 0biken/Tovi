@@ -22,6 +22,11 @@ impl DeviceId {
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
+
+    /// First 8 hex characters, for display
+    pub fn short(&self) -> String {
+        self.to_string()[..8].to_string()
+    }
 }
 
 impl std::str::FromStr for DeviceId {
