@@ -3,7 +3,8 @@ import { useNavigate, useParams } from "react-router-dom";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api, Device, subscribe } from "../api";
-import { formatBytes, formatSpeed, platformIcon } from "../format";
+import { platformIcon } from "../format";
+import TransferProgress from "../components/TransferProgress";
 
 type State = "idle" | "drag-over" | "transferring" | "done" | "error";
 
@@ -181,13 +182,14 @@ export default function SendPage() {
             {fileName}
             {queue.count > 1 ? ` (${queue.index} of ${queue.count})` : ""}
           </p>
-          <p className="text-sm text-slate-400">
-            {reconnecting
-              ? "Connection lost. Reconnecting to resume…"
-              : progress.total > 0
-                ? `${formatBytes(progress.done)} of ${formatBytes(progress.total)} · ${formatSpeed(progress.speed)}`
-                : "Connecting…"}
-          </p>
+          <div className="w-80">
+            <TransferProgress
+              done={progress.done}
+              total={progress.total}
+              speed={progress.speed}
+              reconnecting={reconnecting}
+            />
+          </div>
         </div>
       )}
 

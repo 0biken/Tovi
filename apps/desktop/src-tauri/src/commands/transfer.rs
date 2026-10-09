@@ -2,7 +2,8 @@ use super::{direction_str, message, parse_device_id, short, transfer_id_hex, Com
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::Path;
-use tauri::State;
+use tauri::{AppHandle, State};
+use tauri_plugin_opener::OpenerExt;
 use tovi_core::node::Node;
 use tovi_core::storage::TransferStatus;
 
@@ -87,4 +88,43 @@ pub fn list_transfers(
             error: t.error,
         })
         .collect())
+}
+
+/// The file a history entry points at, if it is still on disk
+fn history_file(node: &Node, id: &str) -> CommandResult<std::path::PathBuf> {
+    let record = node
+        .history(1000)
+        .map_err(message)?
+        .into_iter()
+        .find(|t| transfer_id_hex(&t.id) == id)
+        .ok_or("That transfer is no longer in the history")?;
+    let path = record.path.ok_or("This transfer has no file on disk")?;
+    if !path.exists() {
+        return Err("The file has been moved or deleted".into());
+    }
+    Ok(path)
+}
+
+/// Open a transferred file with the default app
+#[tauri::command]
+pub fn open_transfer_file(
+    app: AppHandle,
+    node: State<'_, Node>,
+    transfer_id: String,
+) -> CommandResult<()> {
+    let path = history_file(&node, &transfer_id)?;
+    app.opener()
+        .open_path(path.to_string_lossy(), None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
+/// Show a transferred file in the file manager
+#[tauri::command]
+pub fn reveal_transfer_file(
+    app: AppHandle,
+    node: State<'_, Node>,
+    transfer_id: String,
+) -> CommandResult<()> {
+    let path = history_file(&node, &transfer_id)?;
+    app.opener().reveal_item_in_dir(path).map_err(|e| e.to_string())
 }

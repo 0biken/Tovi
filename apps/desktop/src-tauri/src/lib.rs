@@ -10,6 +10,7 @@ pub fn run() {
     tracing_subscriber::fmt::init();
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             // The app keeps its own identity and database, separate from the
             // CLI's, so the two on one PC are two different devices.
@@ -41,6 +42,8 @@ pub fn run() {
             // Transfer
             commands::transfer::send_file,
             commands::transfer::list_transfers,
+            commands::transfer::open_transfer_file,
+            commands::transfer::reveal_transfer_file,
             // Settings
             commands::settings::get_receive_folder,
             commands::settings::set_receive_folder,

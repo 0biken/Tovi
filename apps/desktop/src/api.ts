@@ -59,6 +59,9 @@ export const api = {
   respond: (requestId: number, allow: boolean) => invoke<boolean>("respond", { requestId, allow }),
   sendFile: (deviceId: string, path: string) => invoke<SendResult>("send_file", { deviceId, path }),
   listTransfers: (limit?: number) => invoke<TransferRecord[]>("list_transfers", { limit }),
+  openTransferFile: (transferId: string) => invoke<void>("open_transfer_file", { transferId }),
+  revealTransferFile: (transferId: string) =>
+    invoke<void>("reveal_transfer_file", { transferId }),
   getReceiveFolder: () => invoke<ReceiveFolderInfo>("get_receive_folder"),
   setReceiveFolder: (path: string) => invoke<void>("set_receive_folder", { path }),
   getAutoAccept: () => invoke<boolean>("get_auto_accept"),

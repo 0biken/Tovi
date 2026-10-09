@@ -1,5 +1,7 @@
-import { NavLink, Outlet } from "react-router-dom";
+import { NavLink, Outlet, useLocation } from "react-router-dom";
 import Prompts from "./Prompts";
+import TransferProgress from "./TransferProgress";
+import { useActiveTransfers } from "../useActiveTransfers";
 
 const navItems = [
   { to: "/", label: "Devices", icon: "📡" },
@@ -9,6 +11,11 @@ const navItems = [
 ];
 
 export default function Layout() {
+  const active = useActiveTransfers();
+  // Send and History show progress themselves
+  const { pathname } = useLocation();
+  const showFooter =
+    active.length > 0 && !pathname.startsWith("/send") && !pathname.startsWith("/history");
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-tovi-dark">
       {/* Sidebar */}
@@ -37,9 +44,28 @@ export default function Layout() {
       </aside>
 
       {/* Main content */}
-      <main className="flex-1 overflow-y-auto p-6">
-        <Outlet />
-      </main>
+      <div className="flex min-w-0 flex-1 flex-col">
+        <main className="flex-1 overflow-y-auto p-6">
+          <Outlet />
+        </main>
+        {showFooter && (
+          <footer className="space-y-3 border-t border-tovi-border bg-tovi-panel px-6 py-3">
+            {active.map((t) => (
+              <div key={t.id}>
+                <p className="mb-1 truncate text-sm text-slate-200">
+                  {t.direction === "sent" ? "↑" : "↓"} {t.fileName} · {t.deviceName}
+                </p>
+                <TransferProgress
+                  done={t.done}
+                  total={t.total}
+                  speed={t.speed}
+                  reconnecting={t.reconnecting}
+                />
+              </div>
+            ))}
+          </footer>
+        )}
+      </div>
 
       <Prompts />
     </div>
