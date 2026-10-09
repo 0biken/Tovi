@@ -1,14 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
+import { ask } from "@tauri-apps/plugin-dialog";
 import { api, subscribe, TransferRecord } from "../api";
 import { formatBytes } from "../format";
-import TransferProgress from "../components/TransferProgress";
-import { useActiveTransfers } from "../useActiveTransfers";
+import ActiveTransferList from "../components/ActiveTransferList";
+import { useActiveTransferIds } from "../useActiveTransfers";
 
 const STATUS_ICON: Record<TransferRecord["status"], string> = {
   completed: "✅",
   failed: "❌",
   in_progress: "⏳",
 };
+
+/** File types Windows runs when opened */
+const RUNNABLE = /\.(exe|msi|bat|cmd|com|scr|ps1|vbs|vbe|js|jse|wsf|wsh|hta|lnk|reg|cpl|jar)$/i;
 
 function groupByDate(records: TransferRecord[]): [string, TransferRecord[]][] {
   const groups = new Map<string, TransferRecord[]>();
@@ -27,13 +31,29 @@ export default function HistoryPage() {
   const [error, setError] = useState<string | null>(null);
   const [retrying, setRetrying] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  const active = useActiveTransfers();
-  const activeIds = new Set(active.map((t) => t.id));
+  const activeIds = useActiveTransferIds();
 
-  const openFile = (r: TransferRecord, reveal: boolean) =>
-    (reveal ? api.revealTransferFile(r.id) : api.openTransferFile(r.id)).catch((e) =>
-      setError(String(e)),
-    );
+  const openFile = async (r: TransferRecord, reveal: boolean) => {
+    try {
+      if (reveal) return await api.revealTransferFile(r.id);
+      // Opening a program runs it: check first when it came from another device
+      if (
+        r.direction === "received" &&
+        RUNNABLE.test(r.file_name) &&
+        !(await ask(`"${r.file_name}" is a program. Opening it will run it on this computer.`, {
+          title: "Run this file?",
+          kind: "warning",
+          okLabel: "Run",
+          cancelLabel: "Cancel",
+        }))
+      ) {
+        return;
+      }
+      await api.openTransferFile(r.id);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
 
   const refresh = useCallback(async () => {
     try {
@@ -77,32 +97,7 @@ export default function HistoryPage() {
       <h1 className="mb-6 text-xl font-semibold">Transfer History</h1>
       {error && <p className="mb-4 text-sm text-red-400">{error}</p>}
 
-      {active.length > 0 && (
-        <section className="mb-6">
-          <h2 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">
-            In progress
-          </h2>
-          <ul className="space-y-2">
-            {active.map((t) => (
-              <li
-                key={t.id}
-                className="rounded-xl border border-tovi-blue/40 bg-tovi-panel px-5 py-3"
-              >
-                <p className="truncate font-medium text-slate-100">{t.fileName}</p>
-                <p className="mb-2 text-sm text-slate-400">
-                  {t.direction === "sent" ? "↑ To" : "↓ From"} {t.deviceName}
-                </p>
-                <TransferProgress
-                  done={t.done}
-                  total={t.total}
-                  speed={t.speed}
-                  reconnecting={t.reconnecting}
-                />
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
+      <ActiveTransferList variant="card" />
 
       <input
         type="search"
@@ -114,10 +109,12 @@ export default function HistoryPage() {
 
       {loading ? (
         <p className="text-slate-400">Loading…</p>
-      ) : visible.length === 0 && active.length === 0 ? (
+      ) : visible.length === 0 ? (
         <div className="flex flex-col items-center gap-3 pt-20 text-slate-400">
           <span className="text-5xl">📋</span>
-          <p>{records.length === 0 ? "No transfers yet" : "No matches"}</p>
+          <p>
+            {q !== "" ? "No matches" : activeIds.size > 0 ? "Nothing finished yet" : "No transfers yet"}
+          </p>
         </div>
       ) : (
         groupByDate(visible).map(([label, items]) => (

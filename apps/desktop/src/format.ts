@@ -25,9 +25,9 @@ export function formatSpeed(bytesPerSec: number) {
 export function formatDuration(seconds: number) {
   const s = Math.max(1, Math.round(seconds));
   if (s < 60) return `${s} s`;
-  if (s < 3600) return `${Math.round(s / 60)} min`;
-  const h = Math.floor(s / 3600);
-  return `${h} h ${String(Math.round((s % 3600) / 60)).padStart(2, "0")} min`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} min`;
+  return `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, "0")} min`;
 }
 
 /** "just now", "5 min ago", "3 h ago", "2 days ago" */
