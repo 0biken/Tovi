@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::{broadcast, oneshot, Semaphore};
 use tokio::task::{JoinHandle, JoinSet};
 
 /// Default UDP port (Tech doc §13). If it's taken, a free one is used instead.
@@ -162,6 +162,9 @@ pub struct SendReport {
     pub elapsed: Duration,
 }
 
+/// Handshakes accepted at once; further attempts are refused until some finish
+pub const MAX_CONCURRENT_HANDSHAKES: usize = 32;
+
 /// A running TOVI device. Cheap to clone; clones share the same device.
 #[derive(Clone)]
 pub struct Node {
@@ -184,6 +187,8 @@ struct Inner {
     /// Background work, so shutdown can wait for all of it
     accept_task: Mutex<Option<JoinHandle<()>>>,
     connection_tasks: Mutex<JoinSet<()>>,
+    /// Limits handshakes in flight; a permit is held only until the handshake ends
+    handshakes: Arc<Semaphore>,
 }
 
 impl Node {
@@ -228,6 +233,7 @@ impl Node {
                 approval_timeout: config.approval_timeout,
                 accept_task: Mutex::new(None),
                 connection_tasks: Mutex::new(JoinSet::new()),
+                handshakes: Arc::new(Semaphore::new(MAX_CONCURRENT_HANDSHAKES)),
             }),
         };
         let accept = tokio::spawn(accept_loop(node.inner.clone()));
@@ -564,16 +570,25 @@ impl Inner {
 }
 
 async fn accept_loop(inner: Arc<Inner>) {
-    while let Some(incoming) = inner.endpoint.accept().await {
-        match incoming {
-            Ok(conn) => {
-                let mut tasks = inner.connection_tasks.lock().unwrap();
-                // Forget connections that already ended, so the set stays small
-                while tasks.try_join_next().is_some() {}
-                tasks.spawn(handle_connection(inner.clone(), conn));
+    while let Some(incoming) = inner.endpoint.accept_incoming().await {
+        let Ok(permit) = inner.handshakes.clone().try_acquire_owned() else {
+            tracing::warn!("too many handshakes in flight; refusing a connection");
+            incoming.refuse();
+            continue;
+        };
+        let mut tasks = inner.connection_tasks.lock().unwrap();
+        // Forget connections that already ended, so the set stays small
+        while tasks.try_join_next().is_some() {}
+        let task_inner = inner.clone();
+        tasks.spawn(async move {
+            let accepted = task_inner.endpoint.finish_accept(incoming).await;
+            // Long transfers must not hold a handshake slot
+            drop(permit);
+            match accepted {
+                Ok(conn) => handle_connection(task_inner, conn).await,
+                Err(e) => tracing::info!("refused a connection: {e:#}"),
             }
-            Err(e) => tracing::info!("refused a connection: {e:#}"),
-        }
+        });
     }
 }
 

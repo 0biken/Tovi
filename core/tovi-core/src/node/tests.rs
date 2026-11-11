@@ -415,3 +415,56 @@ async fn busy_port_falls_back_to_a_free_one() {
     drop(node);
     let _ = fs::remove_dir_all(dir);
 }
+
+#[tokio::test]
+async fn stalled_handshake_does_not_block_others() {
+    let mut desktop = start("Desk").await;
+    let phone = start("Phone").await;
+    pair(&mut desktop, &phone, true).await.unwrap();
+
+    // A proxy that forwards only the first datagram to the desktop and drops
+    // everything else, so a client's handshake starts but never finishes
+    let desktop_addr = desktop.node.local_addr().unwrap();
+    let proxy = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = proxy.local_addr().unwrap();
+    let proxy_task = tokio::spawn(async move {
+        let mut buf = vec![0u8; 2048];
+        let (n, _) = proxy.recv_from(&mut buf).await.unwrap();
+        proxy.send_to(&buf[..n], desktop_addr).await.unwrap();
+        loop {
+            let _ = proxy.recv_from(&mut buf).await;
+        }
+    });
+
+    let stalled = QuicEndpoint::bind(
+        Arc::new(DeviceIdentity::generate_new()),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        Arc::new(|_: &DeviceId| false),
+    )
+    .unwrap();
+    let desktop_key = desktop.node.device_id().public_key().unwrap();
+    let stalled_task = tokio::spawn(async move { stalled.connect(proxy_addr, &desktop_key).await });
+    // Let the desktop take the stalled incoming connection
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let (source, data) = phone.file("after-stall.bin", 64 * 1024);
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        phone.node.send_file(&desktop.node.device_id(), &source),
+    )
+    .await
+    .expect("send was blocked by a stalled handshake")
+    .unwrap();
+    let outcome = desktop
+        .wait_for(|e| finished_outcome(e, Direction::Received))
+        .await;
+    let TransferOutcome::Completed { path, .. } = outcome else {
+        panic!("receive did not complete: {outcome:?}")
+    };
+    assert_eq!(fs::read(path.unwrap()).unwrap(), data);
+
+    stalled_task.abort();
+    proxy_task.abort();
+    desktop.stop().await;
+    phone.stop().await;
+}
