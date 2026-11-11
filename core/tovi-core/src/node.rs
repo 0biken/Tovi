@@ -11,6 +11,7 @@
 //! The CLI and the desktop app are thin layers over this; the mobile apps
 //! will be too.
 
+use crate::discovery::{Discovery, BROWSE_WINDOW};
 use crate::identity::{DeviceId, DeviceIdentity, FileKeyStore};
 use crate::pairing::{self, PairingCode, PairingManager, PairingRequest};
 use crate::protocol::{Hello, TransferOffer};
@@ -20,7 +21,7 @@ use crate::transfer::{
 };
 use crate::transport::{candidate_addresses, PeerConnection, QuicEndpoint};
 use crate::trust::{TrustStore, TrustedDevice};
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -56,6 +57,11 @@ pub struct NodeConfig {
     /// For automated testing only.
     pub auto_approve_pairing: bool,
     pub approval_timeout: Duration,
+    /// How to find paired devices that changed address, and to be found
+    /// ourselves; `None` turns discovery off
+    pub discovery: Option<Arc<dyn Discovery>>,
+    /// Advertise this device on the network (only matters with `discovery`)
+    pub advertise: bool,
 }
 
 impl NodeConfig {
@@ -72,6 +78,8 @@ impl NodeConfig {
             receive_dir_override: None,
             auto_approve_pairing: false,
             approval_timeout: APPROVAL_TIMEOUT,
+            discovery: None,
+            advertise: true,
         }
     }
 }
@@ -189,6 +197,7 @@ struct Inner {
     connection_tasks: Mutex<JoinSet<()>>,
     /// Limits handshakes in flight; a permit is held only until the handshake ends
     handshakes: Arc<Semaphore>,
+    discovery: Option<Arc<dyn Discovery>>,
 }
 
 impl Node {
@@ -213,6 +222,17 @@ impl Node {
             Err(e) => return Err(e),
         };
 
+        if let (true, Some(discovery)) = (config.advertise, &config.discovery) {
+            match endpoint.local_addr() {
+                Ok(addr) => {
+                    if let Err(e) = discovery.advertise(addr.port()) {
+                        tracing::warn!("could not advertise on the network: {e:#}");
+                    }
+                }
+                Err(e) => tracing::warn!("could not advertise on the network: {e:#}"),
+            }
+        }
+
         let (events, receiver) = broadcast::channel(EVENT_BUFFER);
         let receive_dir = config.receive_dir_override.clone().unwrap_or_else(|| {
             stored_receive_dir(&store).unwrap_or_else(|| config.default_receive_dir.clone())
@@ -234,6 +254,7 @@ impl Node {
                 accept_task: Mutex::new(None),
                 connection_tasks: Mutex::new(JoinSet::new()),
                 handshakes: Arc::new(Semaphore::new(MAX_CONCURRENT_HANDSHAKES)),
+                discovery: config.discovery,
             }),
         };
         let accept = tokio::spawn(accept_loop(node.inner.clone()));
@@ -387,13 +408,12 @@ impl Node {
             .get(to)?
             .context("that device is not paired; pair with it first")?;
         let addresses = inner.store.device_addresses(&device.id)?;
-        if addresses.is_empty() {
+        if addresses.is_empty() && inner.discovery.is_none() {
             bail!(
                 "no known address for {}; pair again with its code",
                 device.name
             );
         }
-        let key = device.id.public_key()?;
 
         let options = SendOptions::default();
         let fresh = OutgoingTransfer::new(path, options)?;
@@ -430,13 +450,12 @@ impl Node {
             })
         };
 
-        let conn = match inner.endpoint.connect_any(&addresses, &key).await {
+        // A refusal only shows once the transfer starts, so a connect error
+        // here always means the device could not be reached
+        let conn = match inner.connect_device(&device).await {
             Ok(conn) => conn,
             Err(e) => {
-                let error = format!(
-                    "could not reach {} at its last known address; is TOVI running there? ({e:#})",
-                    device.name
-                );
+                let error = format!("{e:#}");
                 finish(TransferOutcome::Interrupted {
                     error: error.clone(),
                 });
@@ -451,11 +470,9 @@ impl Node {
         let started = Instant::now();
         let progress = ProgressThrottle::new(inner, id, Direction::Sent);
         let result = transfer::send_with_resume(
-            &inner.endpoint,
-            &addresses,
-            &key,
             conn,
             &transfer,
+            || inner.connect_device(&device),
             |p| progress.update(p),
             |e| {
                 inner.emit(Event::TransferReconnecting {
@@ -508,6 +525,9 @@ impl Node {
     /// have been told. Returns once all background work has finished, so
     /// the database and files are closed when the last `Node` is dropped.
     pub async fn shutdown(&self) {
+        if let Some(discovery) = &self.inner.discovery {
+            discovery.stop_advertising();
+        }
         self.inner.endpoint.shutdown().await;
         let accept = self.inner.accept_task.lock().unwrap().take();
         if let Some(accept) = accept {
@@ -531,6 +551,58 @@ impl Inner {
     fn emit(&self, event: Event) {
         // No subscribers is fine: nobody is listening right now
         let _ = self.events.send(event);
+    }
+
+    /// Connect to a paired device at its saved addresses; if none answers,
+    /// look for it on the network (when discovery is set) and remember where
+    /// it was found
+    async fn connect_device(&self, device: &TrustedDevice) -> Result<PeerConnection> {
+        let key = device.id.public_key()?;
+        let saved = self.store.device_addresses(&device.id)?;
+        let first_error = match self.endpoint.connect_any(&saved, &key).await {
+            Ok(conn) => return Ok(conn),
+            Err(e) => e,
+        };
+        let Some(discovery) = &self.discovery else {
+            return Err(first_error.context(format!(
+                "could not reach {} at its last known address; is TOVI running there?",
+                device.name
+            )));
+        };
+
+        let not_found = |cause: anyhow::Error| {
+            cause.context(anyhow!(
+                "could not reach {}: not found on this network; is TOVI running there?",
+                device.name
+            ))
+        };
+        let found = match discovery.browse(BROWSE_WINDOW).await {
+            Ok(found) => found,
+            Err(e) => {
+                tracing::warn!("browsing the network failed: {e:#}");
+                Vec::new()
+            }
+        };
+        // Adverts are anonymous: other devices (and ourselves) show up too, and
+        // the pinned key makes their handshakes fail
+        let new: Vec<SocketAddr> = found.into_iter().filter(|a| !saved.contains(a)).collect();
+        if new.is_empty() {
+            return Err(not_found(first_error));
+        }
+        match self.endpoint.connect_any(&new, &key).await {
+            Ok(conn) => {
+                let found_at = conn.remote_address();
+                let mut addresses = vec![found_at];
+                addresses.extend(saved.into_iter().filter(|a| *a != found_at));
+                if let Err(e) = self.store.set_device_addresses(&device.id, &addresses) {
+                    tracing::warn!("could not save the new address: {e:#}");
+                }
+                Ok(conn)
+            }
+            Err(e) => Err(not_found(
+                e.context(format!("saved addresses: {first_error:#}")),
+            )),
+        }
     }
 
     fn auto_accept(&self) -> bool {

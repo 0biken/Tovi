@@ -27,9 +27,8 @@ use crate::protocol::{
     MAX_HAVE_RANGES,
 };
 use crate::storage::{Direction, NewTransfer, Store};
-use crate::transport::{PeerConnection, QuicEndpoint};
+use crate::transport::PeerConnection;
 use anyhow::{anyhow, bail, ensure, Context, Result};
-use ed25519_dalek::VerifyingKey;
 use quinn::{RecvStream, SendStream};
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -38,7 +37,6 @@ use std::fmt::{self, Write as _};
 use std::fs::{self, File, OpenOptions};
 use std::future::Future;
 use std::io::{Seek, SeekFrom, Write};
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -362,20 +360,21 @@ pub async fn send_file(
 /// Send `transfer`, reconnecting and resuming if the connection drops.
 ///
 /// After a drop it waits briefly (backing off from 0.5 s to 5 s between
-/// attempts), reconnects to `addrs` pinning `server_key`, and resumes. It gives
+/// attempts), reconnects with `connect`, and resumes. It gives
 /// up with [`ConnectionLost`] once [`RECONNECT_WINDOW`] has passed without the
 /// receiver gaining any more of the file. A connection the receiver refused
 /// (it no longer trusts this device) is never retried. `on_drop` is told about
 /// each drop. Returns the connection in use at the end, which may be a new one.
-pub async fn send_with_resume(
-    endpoint: &QuicEndpoint,
-    addrs: &[SocketAddr],
-    server_key: &VerifyingKey,
+pub async fn send_with_resume<Fut>(
     mut conn: PeerConnection,
     transfer: &OutgoingTransfer,
+    connect: impl Fn() -> Fut,
     progress: impl Fn(Progress),
     on_drop: impl Fn(&anyhow::Error),
-) -> Result<(PeerConnection, blake3::Hash)> {
+) -> Result<(PeerConnection, blake3::Hash)>
+where
+    Fut: Future<Output = Result<PeerConnection>>,
+{
     let furthest = AtomicU64::new(0);
     let mut furthest_at_last_drop = 0;
     let mut give_up_at: Option<Instant> = None;
@@ -410,7 +409,7 @@ pub async fn send_with_resume(
                 }
                 tokio::time::sleep(delay).await;
                 delay = (delay * 2).min(Duration::from_secs(5));
-                conn = reconnect(endpoint, addrs, server_key, deadline)
+                conn = reconnect(&connect, deadline)
                     .await
                     .map_err(|re| lost(format!("{e:#}; last attempt: {re:#}")))?;
             }
@@ -419,15 +418,13 @@ pub async fn send_with_resume(
     }
 }
 
-async fn reconnect(
-    endpoint: &QuicEndpoint,
-    addrs: &[SocketAddr],
-    server_key: &VerifyingKey,
-    deadline: Instant,
-) -> Result<PeerConnection> {
+async fn reconnect<Fut>(connect: &impl Fn() -> Fut, deadline: Instant) -> Result<PeerConnection>
+where
+    Fut: Future<Output = Result<PeerConnection>>,
+{
     let mut delay = Duration::from_millis(500);
     loop {
-        match endpoint.connect_any(addrs, server_key).await {
+        match connect().await {
             Ok(conn) => return Ok(conn),
             Err(e) if Instant::now() + delay >= deadline => return Err(e),
             Err(_) => {
@@ -1118,7 +1115,9 @@ pub fn sanitize_file_name(raw: &str) -> String {
 mod tests {
     use super::*;
     use crate::identity::DeviceIdentity;
-    use std::net::{IpAddr, Ipv4Addr};
+    use crate::transport::QuicEndpoint;
+    use ed25519_dalek::VerifyingKey;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     const LOCALHOST: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
 
@@ -1464,11 +1463,13 @@ mod tests {
         let drops = AtomicU64::new(0);
         let first_progress = Mutex::new(None);
         let (_conn, hash) = send_with_resume(
-            &link.sender_endpoint,
-            &[addr],
-            &link.receiver_key,
             link.sender.clone(),
             &transfer,
+            || async {
+                link.sender_endpoint
+                    .connect_any(&[addr], &link.receiver_key)
+                    .await
+            },
             |p| {
                 first_progress.lock().unwrap().get_or_insert(p.done);
             },
@@ -1863,11 +1864,13 @@ mod tests {
         let addr = link.receiver_endpoint.local_addr().unwrap();
         let started = Instant::now();
         let err = send_with_resume(
-            &link.sender_endpoint,
-            &[addr],
-            &link.receiver_key,
             link.sender.clone(),
             &transfer,
+            || async {
+                link.sender_endpoint
+                    .connect_any(&[addr], &link.receiver_key)
+                    .await
+            },
             |_| {},
             |_| {
                 drops.fetch_add(1, Ordering::Relaxed);
