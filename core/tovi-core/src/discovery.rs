@@ -42,6 +42,8 @@ pub struct MdnsDiscovery {
     daemon: ServiceDaemon,
     instance_id: String,
     registered: Mutex<Option<String>>,
+    /// mdns-sd keeps one querier per service type, so browses must not overlap
+    browse_lock: tokio::sync::Mutex<()>,
 }
 
 impl fmt::Debug for MdnsDiscovery {
@@ -59,6 +61,7 @@ impl MdnsDiscovery {
             daemon: ServiceDaemon::new()?,
             instance_id: random_instance_id(),
             registered: Mutex::new(None),
+            browse_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -98,11 +101,20 @@ impl Discovery for MdnsDiscovery {
     fn browse(&self, window: Duration) -> BrowseFuture<'_> {
         Box::pin(async move {
             let own = self.own_fullname();
+            // Serialize: a second concurrent browse would replace the first's
+            // querier, and either one stopping would end the other's.
+            let _serial = self.browse_lock.lock().await;
             let receiver = self.daemon.browse(SERVICE_TYPE)?;
+            // Stops the browse even if this future is dropped mid-window.
+            let _stop = StopBrowse(&self.daemon);
             let deadline = Instant::now() + window;
             let mut found = BTreeSet::new();
-            while let Ok(Ok(event)) = tokio::time::timeout_at(deadline, receiver.recv_async()).await
-            {
+            loop {
+                let event = match tokio::time::timeout_at(deadline, receiver.recv_async()).await {
+                    Err(_elapsed) => break,
+                    Ok(Ok(event)) => event,
+                    Ok(Err(_closed)) => anyhow::bail!("mDNS daemon stopped during browse"),
+                };
                 if let ServiceEvent::ServiceResolved(info) = event {
                     if info.get_fullname() == own {
                         continue;
@@ -114,9 +126,17 @@ impl Discovery for MdnsDiscovery {
                     }
                 }
             }
-            let _ = self.daemon.stop_browse(SERVICE_TYPE);
             Ok(found.into_iter().collect())
         })
+    }
+}
+
+/// Stops the service-type browse on drop, including on cancellation.
+struct StopBrowse<'a>(&'a ServiceDaemon);
+
+impl Drop for StopBrowse<'_> {
+    fn drop(&mut self) {
+        let _ = self.0.stop_browse(SERVICE_TYPE);
     }
 }
 
@@ -199,5 +219,34 @@ mod tests {
         a.advertise(50001).unwrap();
         let found = b.browse(BROWSE_WINDOW).await.unwrap();
         assert!(found.iter().any(|addr| addr.port() == 50001), "{found:?}");
+    }
+
+    #[tokio::test]
+    #[ignore = "needs multicast"]
+    async fn concurrent_browses_both_complete() {
+        let a = MdnsDiscovery::new().unwrap();
+        let b = MdnsDiscovery::new().unwrap();
+        b.advertise(50002).unwrap();
+        let start = std::time::Instant::now();
+        let (r1, r2) = tokio::join!(a.browse(BROWSE_WINDOW), a.browse(BROWSE_WINDOW));
+        for found in [r1.unwrap(), r2.unwrap()] {
+            assert!(found.iter().any(|addr| addr.port() == 50002), "{found:?}");
+        }
+        // serialized: two full windows back to back
+        assert!(start.elapsed() >= BROWSE_WINDOW * 2);
+    }
+
+    #[tokio::test]
+    #[ignore = "needs multicast"]
+    async fn cancelled_browse_stops_querying_enough_for_next_browse() {
+        let a = MdnsDiscovery::new().unwrap();
+        let b = MdnsDiscovery::new().unwrap();
+        b.advertise(50003).unwrap();
+        // Drop a browse mid-window; the lock and the browse must be released.
+        let _ = tokio::time::timeout(Duration::from_millis(100), a.browse(BROWSE_WINDOW)).await;
+        let start = std::time::Instant::now();
+        let found = a.browse(BROWSE_WINDOW).await.unwrap();
+        assert!(start.elapsed() < BROWSE_WINDOW + Duration::from_millis(1000));
+        assert!(found.iter().any(|addr| addr.port() == 50003), "{found:?}");
     }
 }
