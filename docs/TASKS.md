@@ -57,9 +57,9 @@ Decisions are recorded in [`architecture/decisions.md`](architecture/decisions.m
 
 ## 4. Core — discovery (`discovery`)
 
-- [x] `Discovery` trait (advertise / browse / events); call `ServiceDaemon::shutdown()` on drop
+- [x] `Discovery` trait (advertise / stop advertising / browse; no events); call `ServiceDaemon::shutdown()` on drop
 - [x] Desktop implementation using `mdns-sd`, service `_tovi._udp.local`
-- [x] TXT record: protocol version, port, opaque ID (not the human device name)
+- [x] TXT record holds only the protocol version (`v=1`); the port is in the SRV record and the opaque random ID is the instance name (not the human device name)
 - [x] Bounded browse windows (battery, §38)
 
 ## 5. Core — pairing (new `pairing` module)

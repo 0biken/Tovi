@@ -397,7 +397,8 @@ impl Node {
 
     // ---------------------------------------------------------- sending
 
-    /// Send a file to a paired device at its last known addresses. Reconnects
+    /// Send a file to a paired device at its last known addresses, falling
+    /// back to discovery on the local network when those fail. Reconnects
     /// and resumes after drops; an unfinished earlier send of the same file
     /// to the same device is resumed. Returns once the receiver has verified
     /// and saved it.
@@ -591,10 +592,10 @@ impl Inner {
         }
         match self.endpoint.connect_any(&new, &key).await {
             Ok(conn) => {
-                let found_at = conn.remote_address();
-                let mut addresses = vec![found_at];
-                addresses.extend(saved.into_iter().filter(|a| *a != found_at));
-                if let Err(e) = self.store.set_device_addresses(&device.id, &addresses) {
+                if let Err(e) = self
+                    .store
+                    .remember_address(&device.id, conn.remote_address())
+                {
                     tracing::warn!("could not save the new address: {e:#}");
                 }
                 Ok(conn)

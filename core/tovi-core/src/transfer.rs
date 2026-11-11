@@ -365,6 +365,10 @@ pub async fn send_file(
 /// receiver gaining any more of the file. A connection the receiver refused
 /// (it no longer trusts this device) is never retried. `on_drop` is told about
 /// each drop. Returns the connection in use at the end, which may be a new one.
+///
+/// The deadline is only checked between attempts, and one `connect` attempt
+/// (saved addresses, then discovery) can take up to about 23 s, so giving up
+/// can come that much later than [`RECONNECT_WINDOW`].
 pub async fn send_with_resume<Fut>(
     mut conn: PeerConnection,
     transfer: &OutgoingTransfer,

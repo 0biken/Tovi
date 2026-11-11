@@ -539,6 +539,32 @@ async fn send_finds_moved_device() {
 }
 
 #[tokio::test]
+async fn moved_device_address_list_stays_capped() {
+    let fake = Arc::new(FakeDiscovery::default());
+    let (desktop, phone) = moved_desktop(&fake).await;
+    let desktop_addr = desktop.node.local_addr().unwrap();
+    let desktop_id = desktop.node.device_id();
+    let stale: Vec<SocketAddr> = (0..8)
+        .map(|i| SocketAddr::from(([127, 0, 0, 1], 9 + i)))
+        .collect();
+    phone
+        .node
+        .store()
+        .set_device_addresses(&desktop_id, &stale)
+        .unwrap();
+    *fake.found.lock().unwrap() = vec![desktop_addr];
+
+    let (source, _) = phone.file("capped.txt", 500);
+    phone.node.send_file(&desktop_id, &source).await.unwrap();
+    let saved = phone.node.store().device_addresses(&desktop_id).unwrap();
+    assert!(saved.len() <= 8, "{saved:?}");
+    assert_eq!(saved[0], desktop_addr);
+
+    desktop.stop().await;
+    phone.stop().await;
+}
+
+#[tokio::test]
 async fn send_skips_own_and_stranger_adverts() {
     let fake = Arc::new(FakeDiscovery::default());
     let (desktop, phone) = moved_desktop(&fake).await;

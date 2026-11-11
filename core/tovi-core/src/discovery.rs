@@ -26,6 +26,14 @@ pub const SERVICE_TYPE: &str = "_tovi._udp.local.";
 /// never browse continuously.
 pub const BROWSE_WINDOW: Duration = Duration::from_secs(3);
 
+/// The most addresses a browse returns, so a noisy network can't make a
+/// connect attempt try an unbounded number of them.
+pub const MAX_DISCOVERED_ADDRESSES: usize = 16;
+
+/// How long to wait for the daemon to confirm an unregister, shutdown or
+/// stop-browse; keeps it from logging about a receiver that went away.
+const DAEMON_REPLY_WAIT: Duration = Duration::from_millis(250);
+
 pub type BrowseFuture<'a> = Pin<Box<dyn Future<Output = Result<Vec<SocketAddr>>> + Send + 'a>>;
 
 /// Platform-pluggable LAN discovery.
@@ -94,7 +102,10 @@ impl Discovery for MdnsDiscovery {
 
     fn stop_advertising(&self) {
         if let Some(fullname) = self.registered().take() {
-            let _ = self.daemon.unregister(&fullname);
+            // Wait for the goodbye so the daemon doesn't log a failed reply
+            if let Ok(reply) = self.daemon.unregister(&fullname) {
+                let _ = reply.recv_timeout(DAEMON_REPLY_WAIT);
+            }
         }
     }
 
@@ -106,9 +117,9 @@ impl Discovery for MdnsDiscovery {
             let _serial = self.browse_lock.lock().await;
             let receiver = self.daemon.browse(SERVICE_TYPE)?;
             // Stops the browse even if this future is dropped mid-window.
-            let _stop = StopBrowse(&self.daemon);
+            let mut _stop = StopBrowse(&self.daemon, true);
             let deadline = Instant::now() + window;
-            let mut found = BTreeSet::new();
+            let mut found = Vec::new();
             loop {
                 let event = match tokio::time::timeout_at(deadline, receiver.recv_async()).await {
                     Err(_elapsed) => break,
@@ -119,31 +130,66 @@ impl Discovery for MdnsDiscovery {
                     if info.get_fullname() == own {
                         continue;
                     }
-                    for ip in info.get_addresses() {
-                        if let IpAddr::V4(v4) = ip {
-                            found.insert(SocketAddr::new(IpAddr::V4(*v4), info.get_port()));
-                        }
-                    }
+                    found.extend(info.get_addresses().iter().map(|ip| (*ip, info.get_port())));
                 }
             }
-            Ok(found.into_iter().collect())
+            // Stop now and wait for the daemon's confirmation, so it doesn't
+            // log about answering a receiver we've already dropped
+            if self.daemon.stop_browse(SERVICE_TYPE).is_ok() {
+                _stop.disarm();
+                let _ = tokio::time::timeout(Duration::from_millis(200), async {
+                    while let Ok(event) = receiver.recv_async().await {
+                        if matches!(event, ServiceEvent::SearchStopped(_)) {
+                            break;
+                        }
+                    }
+                })
+                .await;
+            }
+            Ok(local_addresses(found))
         })
     }
 }
 
 /// Stops the service-type browse on drop, including on cancellation.
-struct StopBrowse<'a>(&'a ServiceDaemon);
+struct StopBrowse<'a>(&'a ServiceDaemon, bool);
+
+impl StopBrowse<'_> {
+    /// The browse was stopped explicitly; nothing left to do on drop
+    fn disarm(&mut self) {
+        self.1 = false;
+    }
+}
 
 impl Drop for StopBrowse<'_> {
     fn drop(&mut self) {
-        let _ = self.0.stop_browse(SERVICE_TYPE);
+        if self.1 {
+            let _ = self.0.stop_browse(SERVICE_TYPE);
+        }
     }
+}
+
+/// Keep only IPv4 addresses a LAN peer can have (private, link-local or
+/// loopback), sorted, deduplicated and capped at [`MAX_DISCOVERED_ADDRESSES`]
+fn local_addresses(found: impl IntoIterator<Item = (IpAddr, u16)>) -> Vec<SocketAddr> {
+    let kept: BTreeSet<SocketAddr> = found
+        .into_iter()
+        .filter_map(|(ip, port)| match ip {
+            IpAddr::V4(v4) if v4.is_private() || v4.is_link_local() || v4.is_loopback() => {
+                Some(SocketAddr::new(ip, port))
+            }
+            _ => None,
+        })
+        .collect();
+    kept.into_iter().take(MAX_DISCOVERED_ADDRESSES).collect()
 }
 
 impl Drop for MdnsDiscovery {
     fn drop(&mut self) {
         self.stop_advertising();
-        let _ = self.daemon.shutdown();
+        if let Ok(reply) = self.daemon.shutdown() {
+            let _ = reply.recv_timeout(DAEMON_REPLY_WAIT);
+        }
     }
 }
 
@@ -178,6 +224,41 @@ fn random_instance_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn v4(a: u8, b: u8, c: u8, d: u8, port: u16) -> SocketAddr {
+        SocketAddr::from(([a, b, c, d], port))
+    }
+
+    #[test]
+    fn keeps_only_local_ipv4_sorted_and_deduplicated() {
+        let ips: Vec<(IpAddr, u16)> = vec![
+            (IpAddr::from([8, 8, 8, 8]), 1),
+            (IpAddr::from([192, 168, 1, 5]), 2),
+            (IpAddr::from([192, 168, 1, 5]), 2),
+            (IpAddr::from([10, 0, 0, 1]), 3),
+            (IpAddr::from([169, 254, 1, 1]), 4),
+            (IpAddr::from([127, 0, 0, 1]), 5),
+            (IpAddr::from([0u16, 0, 0, 0, 0, 0, 0, 1]), 6),
+        ];
+        let kept = local_addresses(ips);
+        assert_eq!(
+            kept,
+            vec![
+                v4(10, 0, 0, 1, 3),
+                v4(127, 0, 0, 1, 5),
+                v4(169, 254, 1, 1, 4),
+                v4(192, 168, 1, 5, 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn caps_discovered_addresses() {
+        let ips: Vec<(IpAddr, u16)> = (0..40u16)
+            .map(|i| (IpAddr::from([192, 168, 1, 1]), 1000 + i))
+            .collect();
+        assert_eq!(local_addresses(ips).len(), MAX_DISCOVERED_ADDRESSES);
+    }
 
     #[test]
     fn instance_id_is_valid_dns_label() {

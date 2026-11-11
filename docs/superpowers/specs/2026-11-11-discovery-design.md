@@ -35,7 +35,10 @@ concurrently", all of §4, and §9 "Paired device whose address changed".
    run. When the saved addresses fail, browse briefly, connect to every TOVI service
    found, and keep the connection whose pinned key matches. No schema change; the same
    flow works for Android NSD. Cost: one handshake per TOVI device on the LAN, and
-   strangers' devices see our public key during the TLS handshake.
+   when connecting, the pinned verifier rejects a stranger's certificate before we
+   send ours, so strangers don't learn our key; but a listening device hands its
+   stable key to anyone who connects, so the random advert ID doesn't stop active
+   tracking across runs (tracked separately).
 2. Per-pair secret tags: each device advertises a rotating keyed hash only its paired
    devices recognise. Direct match, but needs a new secret stored at pairing (existing
    pairings must re-pair), bigger adverts and more Android work.
