@@ -134,7 +134,7 @@
 
 - [ ] **Step 1: Write the failing tests** in `node/tests.rs`. Add a test-only `FakeDiscovery { found: Mutex<Vec<SocketAddr>>, advertise_fails: bool, advertised: Mutex<Option<u16>> }` implementing `Discovery`, and a `start_with(name, discovery)` helper.
   - `send_finds_moved_device`:
-    1. Pair `phone` with `desktop`, then `shutdown` desktop and restart it with `start_in` on the same data dir. It gets a new port, so phone's saved address is stale.
+    1. Pair `phone` with `desktop`, then call `desktop.node.shutdown().await` and drop the node. Don't use `TestNode::stop`, which deletes the folder. Restart with `start_in(desktop_dir, "desktop")` on the same folder. It gets a new port, so phone's saved address is stale.
     2. Phone's fake returns `[desktop.local_addr()]`.
     3. `send_file` succeeds, and phone's `store().device_addresses(&desktop_id)?[0] == desktop.local_addr()`.
   - `send_skips_own_and_stranger_adverts`: same stale setup, plus a third unpaired node `stranger`. The fake returns `[phone.local_addr(), stranger.local_addr(), desktop.local_addr()]`. The send succeeds, the file lands in desktop's inbox, and stranger's inbox is empty.
