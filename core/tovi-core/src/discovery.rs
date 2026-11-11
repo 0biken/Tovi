@@ -11,23 +11,54 @@
 use anyhow::Result;
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use rand_core::{OsRng, RngCore};
-use std::collections::HashMap;
-use std::fmt::Write;
+use std::collections::{BTreeSet, HashMap};
+use std::fmt::{self, Write};
+use std::future::Future;
+use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
+use std::sync::Mutex;
+use std::time::Duration;
+use tokio::time::Instant;
 
 pub const SERVICE_TYPE: &str = "_tovi._udp.local.";
 
-pub struct DiscoveryManager {
-    daemon: ServiceDaemon,
-    instance_id: String,
+/// How long a browse listens for answers. Discovery is on demand only; we
+/// never browse continuously.
+pub const BROWSE_WINDOW: Duration = Duration::from_secs(3);
+
+pub type BrowseFuture<'a> = Pin<Box<dyn Future<Output = Result<Vec<SocketAddr>>> + Send + 'a>>;
+
+/// Platform-pluggable LAN discovery.
+pub trait Discovery: Send + Sync + fmt::Debug {
+    /// Start advertising this device at `port`; replaces any earlier advert
+    fn advertise(&self, port: u16) -> Result<()>;
+    fn stop_advertising(&self);
+    /// TOVI services seen within `window`: IPv4, deduplicated, sorted
+    fn browse(&self, window: Duration) -> BrowseFuture<'_>;
 }
 
-impl DiscoveryManager {
+/// Desktop discovery over `mdns-sd`.
+pub struct MdnsDiscovery {
+    daemon: ServiceDaemon,
+    instance_id: String,
+    registered: Mutex<Option<String>>,
+}
+
+impl fmt::Debug for MdnsDiscovery {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MdnsDiscovery")
+            .field("instance_id", &self.instance_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl MdnsDiscovery {
     /// Initialize the mDNS daemon with a fresh random instance ID
     pub fn new() -> Result<Self> {
-        let daemon = ServiceDaemon::new()?;
         Ok(Self {
-            daemon,
+            daemon: ServiceDaemon::new()?,
             instance_id: random_instance_id(),
+            registered: Mutex::new(None),
         })
     }
 
@@ -36,38 +67,80 @@ impl DiscoveryManager {
         &self.instance_id
     }
 
-    /// Advertise this device on the local network
-    pub fn advertise(&self, port: u16) -> Result<()> {
-        let host_name = format!("tovi-{}.local.", self.instance_id);
+    fn registered(&self) -> std::sync::MutexGuard<'_, Option<String>> {
+        self.registered
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
-        let mut properties = HashMap::new();
-        properties.insert("version".to_string(), "1".to_string());
-        properties.insert("platform".to_string(), std::env::consts::OS.to_string());
+    fn own_fullname(&self) -> String {
+        format!("{}.{SERVICE_TYPE}", self.instance_id)
+    }
+}
 
-        let service_info = ServiceInfo::new(
-            SERVICE_TYPE,
-            &self.instance_id,
-            &host_name,
-            "", // No fixed IPs; filled in by enable_addr_auto() below
-            port,
-            properties,
-        )?
-        .enable_addr_auto();
-
-        self.daemon.register(service_info)?;
-        tracing::info!(
-            "Advertising TOVI service: {} on port {port}",
-            self.instance_id
-        );
+impl Discovery for MdnsDiscovery {
+    fn advertise(&self, port: u16) -> Result<()> {
+        self.stop_advertising();
+        let info = service_info(&self.instance_id, port)?;
+        let fullname = info.get_fullname().to_string();
+        self.daemon.register(info)?;
+        *self.registered() = Some(fullname);
+        tracing::info!("Advertising TOVI service on port {port}");
         Ok(())
     }
 
-    /// Browse for other TOVI devices on the local network
-    pub fn browse(&self) -> Result<mdns_sd::Receiver<ServiceEvent>> {
-        let receiver = self.daemon.browse(SERVICE_TYPE)?;
-        tracing::info!("Browsing for TOVI services...");
-        Ok(receiver)
+    fn stop_advertising(&self) {
+        if let Some(fullname) = self.registered().take() {
+            let _ = self.daemon.unregister(&fullname);
+        }
     }
+
+    fn browse(&self, window: Duration) -> BrowseFuture<'_> {
+        Box::pin(async move {
+            let own = self.own_fullname();
+            let receiver = self.daemon.browse(SERVICE_TYPE)?;
+            let deadline = Instant::now() + window;
+            let mut found = BTreeSet::new();
+            while let Ok(Ok(event)) = tokio::time::timeout_at(deadline, receiver.recv_async()).await
+            {
+                if let ServiceEvent::ServiceResolved(info) = event {
+                    if info.get_fullname() == own {
+                        continue;
+                    }
+                    for ip in info.get_addresses() {
+                        if let IpAddr::V4(v4) = ip {
+                            found.insert(SocketAddr::new(IpAddr::V4(*v4), info.get_port()));
+                        }
+                    }
+                }
+            }
+            let _ = self.daemon.stop_browse(SERVICE_TYPE);
+            Ok(found.into_iter().collect())
+        })
+    }
+}
+
+impl Drop for MdnsDiscovery {
+    fn drop(&mut self) {
+        self.stop_advertising();
+        let _ = self.daemon.shutdown();
+    }
+}
+
+/// The anonymous advert: random instance name, TXT holds only the version.
+fn service_info(instance_id: &str, port: u16) -> Result<ServiceInfo> {
+    let host_name = format!("tovi-{instance_id}.local.");
+    let mut properties = HashMap::new();
+    properties.insert("v".to_string(), "1".to_string());
+    Ok(ServiceInfo::new(
+        SERVICE_TYPE,
+        instance_id,
+        &host_name,
+        "", // No fixed IPs; filled in by enable_addr_auto() below
+        port,
+        properties,
+    )?
+    .enable_addr_auto())
 }
 
 /// 64 random bits as 16 lowercase hex chars — a valid DNS label with no
@@ -98,5 +171,33 @@ mod tests {
     #[test]
     fn instance_ids_are_unique() {
         assert_ne!(random_instance_id(), random_instance_id());
+    }
+
+    #[test]
+    fn advert_carries_only_the_version() {
+        let info = service_info("0123456789abcdef", 48210).unwrap();
+        assert_eq!(info.get_properties().len(), 1);
+        assert_eq!(info.get_property_val_str("v"), Some("1"));
+        assert_eq!(info.get_port(), 48210);
+        assert_eq!(info.get_fullname(), "0123456789abcdef._tovi._udp.local.");
+    }
+
+    #[tokio::test]
+    #[ignore = "needs multicast"]
+    async fn browse_returns_within_window() {
+        let d = MdnsDiscovery::new().unwrap();
+        let start = std::time::Instant::now();
+        d.browse(Duration::from_millis(500)).await.unwrap();
+        assert!(start.elapsed() < Duration::from_millis(1500));
+    }
+
+    #[tokio::test]
+    #[ignore = "needs multicast"]
+    async fn two_daemons_find_each_other() {
+        let a = MdnsDiscovery::new().unwrap();
+        let b = MdnsDiscovery::new().unwrap();
+        a.advertise(50001).unwrap();
+        let found = b.browse(BROWSE_WINDOW).await.unwrap();
+        assert!(found.iter().any(|addr| addr.port() == 50001), "{found:?}");
     }
 }
