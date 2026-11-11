@@ -126,5 +126,7 @@ pub fn reveal_transfer_file(
     transfer_id: String,
 ) -> CommandResult<()> {
     let path = history_file(&node, &transfer_id)?;
-    app.opener().reveal_item_in_dir(path).map_err(|e| e.to_string())
+    app.opener()
+        .reveal_item_in_dir(path)
+        .map_err(|e| e.to_string())
 }
