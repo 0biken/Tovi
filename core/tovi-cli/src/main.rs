@@ -15,8 +15,10 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast::{self, error::RecvError};
+use tovi_core::discovery::{Discovery, MdnsDiscovery};
 use tovi_core::identity::{DeviceId, DeviceIdentity, FileKeyStore};
 use tovi_core::node::{Event, Node, NodeConfig, TransferOutcome, DEFAULT_PORT};
 use tovi_core::pairing::{PairingCode, CODE_LIFETIME};
@@ -138,13 +140,23 @@ fn node_config(data_dir: &Path, name: &str) -> Result<NodeConfig> {
     let downloads = dirs::download_dir()
         .context("no Downloads folder; pass --receive-dir")?
         .join("TOVI");
-    Ok(NodeConfig::new(data_dir, name, downloads))
+    let mut config = NodeConfig::new(data_dir, name, downloads);
+    config.discovery = match MdnsDiscovery::new() {
+        Ok(discovery) => Some(Arc::new(discovery) as Arc<dyn Discovery>),
+        Err(err) => {
+            tracing::warn!("discovery unavailable, running without it: {err:#}");
+            None
+        }
+    };
+    Ok(config)
 }
 
 /// For `pair` and `send`: any free port, so a `listen` on this machine keeps 48210
 fn outgoing_config(data_dir: &Path, name: &str) -> Result<NodeConfig> {
     let mut config = node_config(data_dir, name)?;
     config.listen = SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0));
+    // Short-lived senders browse but don't advertise
+    config.advertise = false;
     Ok(config)
 }
 

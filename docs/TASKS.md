@@ -52,15 +52,15 @@ Decisions are recorded in [`architecture/decisions.md`](architecture/decisions.m
 - [x] Enumerate candidate addresses (skip loopback, link-local, Hyper-V/WSL/Docker/VPN); IPv4
 - [ ] IPv6 candidates and dual-stack bind
 - [x] `connect_any`: try all QR endpoints in parallel, first verified connection wins
-- [ ] Accept handshakes concurrently so slow or hostile clients cannot delay others
+- [x] Accept handshakes concurrently so slow or hostile clients cannot delay others
 - [x] Connection timeouts (10 s connect, 30 s idle), 10 s keep-alive, graceful close with close codes
 
 ## 4. Core — discovery (`discovery`)
 
-- [ ] `Discovery` trait (advertise / browse / events); call `ServiceDaemon::shutdown()` on drop
-- [ ] Desktop implementation using `mdns-sd`, service `_tovi._udp.local`
-- [ ] TXT record: protocol version, port, opaque ID (not the human device name)
-- [ ] Bounded browse windows (battery, §38)
+- [x] `Discovery` trait (advertise / stop advertising / browse; no events); call `ServiceDaemon::shutdown()` on drop
+- [x] Desktop implementation using `mdns-sd`, service `_tovi._udp.local`
+- [x] TXT record holds only the protocol version (`v=1`); the port is in the SRV record and the opaque random ID is the instance name (not the human device name)
+- [x] Bounded browse windows (battery, §38)
 
 ## 5. Core — pairing (new `pairing` module)
 
@@ -114,7 +114,7 @@ Decisions are recorded in [`architecture/decisions.md`](architecture/decisions.m
 - [x] SQLite schema: devices (with last addresses), transfers, settings. Per-chunk progress stays in `.tovi.state`; pairing sessions are never stored (single-use secrets)
 - [x] Migrations (`PRAGMA user_version`, one transaction each; a newer database is refused)
 - [x] Transfer history for both directions (started / completed / failed, hash, error)
-- [ ] Paired device whose address changed (e.g. new DHCP lease) can only be found again via discovery (§4)
+- [x] Paired device whose address changed (e.g. new DHCP lease) is found again via discovery (§4)
 
 ## 10. Spike validation (Tech doc §49)
 

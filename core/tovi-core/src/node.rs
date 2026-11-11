@@ -11,6 +11,7 @@
 //! The CLI and the desktop app are thin layers over this; the mobile apps
 //! will be too.
 
+use crate::discovery::{Discovery, BROWSE_WINDOW};
 use crate::identity::{DeviceId, DeviceIdentity, FileKeyStore};
 use crate::pairing::{self, PairingCode, PairingManager, PairingRequest};
 use crate::protocol::{Hello, TransferOffer};
@@ -20,14 +21,14 @@ use crate::transfer::{
 };
 use crate::transport::{candidate_addresses, PeerConnection, QuicEndpoint};
 use crate::trust::{TrustStore, TrustedDevice};
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::{broadcast, oneshot, Semaphore};
 use tokio::task::{JoinHandle, JoinSet};
 
 /// Default UDP port (Tech doc §13). If it's taken, a free one is used instead.
@@ -56,6 +57,11 @@ pub struct NodeConfig {
     /// For automated testing only.
     pub auto_approve_pairing: bool,
     pub approval_timeout: Duration,
+    /// How to find paired devices that changed address, and to be found
+    /// ourselves; `None` turns discovery off
+    pub discovery: Option<Arc<dyn Discovery>>,
+    /// Advertise this device on the network (only matters with `discovery`)
+    pub advertise: bool,
 }
 
 impl NodeConfig {
@@ -72,6 +78,8 @@ impl NodeConfig {
             receive_dir_override: None,
             auto_approve_pairing: false,
             approval_timeout: APPROVAL_TIMEOUT,
+            discovery: None,
+            advertise: true,
         }
     }
 }
@@ -162,6 +170,9 @@ pub struct SendReport {
     pub elapsed: Duration,
 }
 
+/// Handshakes accepted at once; further attempts are refused until some finish
+pub const MAX_CONCURRENT_HANDSHAKES: usize = 32;
+
 /// A running TOVI device. Cheap to clone; clones share the same device.
 #[derive(Clone)]
 pub struct Node {
@@ -184,6 +195,9 @@ struct Inner {
     /// Background work, so shutdown can wait for all of it
     accept_task: Mutex<Option<JoinHandle<()>>>,
     connection_tasks: Mutex<JoinSet<()>>,
+    /// Limits handshakes in flight; a permit is held only until the handshake ends
+    handshakes: Arc<Semaphore>,
+    discovery: Option<Arc<dyn Discovery>>,
 }
 
 impl Node {
@@ -208,6 +222,17 @@ impl Node {
             Err(e) => return Err(e),
         };
 
+        if let (true, Some(discovery)) = (config.advertise, &config.discovery) {
+            match endpoint.local_addr() {
+                Ok(addr) => {
+                    if let Err(e) = discovery.advertise(addr.port()) {
+                        tracing::warn!("could not advertise on the network: {e:#}");
+                    }
+                }
+                Err(e) => tracing::warn!("could not advertise on the network: {e:#}"),
+            }
+        }
+
         let (events, receiver) = broadcast::channel(EVENT_BUFFER);
         let receive_dir = config.receive_dir_override.clone().unwrap_or_else(|| {
             stored_receive_dir(&store).unwrap_or_else(|| config.default_receive_dir.clone())
@@ -228,6 +253,8 @@ impl Node {
                 approval_timeout: config.approval_timeout,
                 accept_task: Mutex::new(None),
                 connection_tasks: Mutex::new(JoinSet::new()),
+                handshakes: Arc::new(Semaphore::new(MAX_CONCURRENT_HANDSHAKES)),
+                discovery: config.discovery,
             }),
         };
         let accept = tokio::spawn(accept_loop(node.inner.clone()));
@@ -370,7 +397,8 @@ impl Node {
 
     // ---------------------------------------------------------- sending
 
-    /// Send a file to a paired device at its last known addresses. Reconnects
+    /// Send a file to a paired device at its last known addresses, falling
+    /// back to discovery on the local network when those fail. Reconnects
     /// and resumes after drops; an unfinished earlier send of the same file
     /// to the same device is resumed. Returns once the receiver has verified
     /// and saved it.
@@ -381,13 +409,12 @@ impl Node {
             .get(to)?
             .context("that device is not paired; pair with it first")?;
         let addresses = inner.store.device_addresses(&device.id)?;
-        if addresses.is_empty() {
+        if addresses.is_empty() && inner.discovery.is_none() {
             bail!(
                 "no known address for {}; pair again with its code",
                 device.name
             );
         }
-        let key = device.id.public_key()?;
 
         let options = SendOptions::default();
         let fresh = OutgoingTransfer::new(path, options)?;
@@ -424,13 +451,12 @@ impl Node {
             })
         };
 
-        let conn = match inner.endpoint.connect_any(&addresses, &key).await {
+        // A refusal only shows once the transfer starts, so a connect error
+        // here always means the device could not be reached
+        let conn = match inner.connect_device(&device).await {
             Ok(conn) => conn,
             Err(e) => {
-                let error = format!(
-                    "could not reach {} at its last known address; is TOVI running there? ({e:#})",
-                    device.name
-                );
+                let error = format!("{e:#}");
                 finish(TransferOutcome::Interrupted {
                     error: error.clone(),
                 });
@@ -445,11 +471,9 @@ impl Node {
         let started = Instant::now();
         let progress = ProgressThrottle::new(inner, id, Direction::Sent);
         let result = transfer::send_with_resume(
-            &inner.endpoint,
-            &addresses,
-            &key,
             conn,
             &transfer,
+            || inner.connect_device(&device),
             |p| progress.update(p),
             |e| {
                 inner.emit(Event::TransferReconnecting {
@@ -502,6 +526,9 @@ impl Node {
     /// have been told. Returns once all background work has finished, so
     /// the database and files are closed when the last `Node` is dropped.
     pub async fn shutdown(&self) {
+        if let Some(discovery) = &self.inner.discovery {
+            discovery.stop_advertising();
+        }
         self.inner.endpoint.shutdown().await;
         let accept = self.inner.accept_task.lock().unwrap().take();
         if let Some(accept) = accept {
@@ -525,6 +552,58 @@ impl Inner {
     fn emit(&self, event: Event) {
         // No subscribers is fine: nobody is listening right now
         let _ = self.events.send(event);
+    }
+
+    /// Connect to a paired device at its saved addresses; if none answers,
+    /// look for it on the network (when discovery is set) and remember where
+    /// it was found
+    async fn connect_device(&self, device: &TrustedDevice) -> Result<PeerConnection> {
+        let key = device.id.public_key()?;
+        let saved = self.store.device_addresses(&device.id)?;
+        let first_error = match self.endpoint.connect_any(&saved, &key).await {
+            Ok(conn) => return Ok(conn),
+            Err(e) => e,
+        };
+        let Some(discovery) = &self.discovery else {
+            return Err(first_error.context(format!(
+                "could not reach {} at its last known address; is TOVI running there?",
+                device.name
+            )));
+        };
+
+        let not_found = |cause: anyhow::Error| {
+            cause.context(anyhow!(
+                "could not reach {}: not found on this network; is TOVI running there?",
+                device.name
+            ))
+        };
+        let found = match discovery.browse(BROWSE_WINDOW).await {
+            Ok(found) => found,
+            Err(e) => {
+                tracing::warn!("browsing the network failed: {e:#}");
+                Vec::new()
+            }
+        };
+        // Adverts are anonymous: other devices (and ourselves) show up too, and
+        // the pinned key makes their handshakes fail
+        let new: Vec<SocketAddr> = found.into_iter().filter(|a| !saved.contains(a)).collect();
+        if new.is_empty() {
+            return Err(not_found(first_error));
+        }
+        match self.endpoint.connect_any(&new, &key).await {
+            Ok(conn) => {
+                if let Err(e) = self
+                    .store
+                    .remember_address(&device.id, conn.remote_address())
+                {
+                    tracing::warn!("could not save the new address: {e:#}");
+                }
+                Ok(conn)
+            }
+            Err(e) => Err(not_found(
+                e.context(format!("saved addresses: {first_error:#}")),
+            )),
+        }
     }
 
     fn auto_accept(&self) -> bool {
@@ -564,16 +643,25 @@ impl Inner {
 }
 
 async fn accept_loop(inner: Arc<Inner>) {
-    while let Some(incoming) = inner.endpoint.accept().await {
-        match incoming {
-            Ok(conn) => {
-                let mut tasks = inner.connection_tasks.lock().unwrap();
-                // Forget connections that already ended, so the set stays small
-                while tasks.try_join_next().is_some() {}
-                tasks.spawn(handle_connection(inner.clone(), conn));
+    while let Some(incoming) = inner.endpoint.accept_incoming().await {
+        let Ok(permit) = inner.handshakes.clone().try_acquire_owned() else {
+            tracing::warn!("too many handshakes in flight; refusing a connection");
+            incoming.refuse();
+            continue;
+        };
+        let mut tasks = inner.connection_tasks.lock().unwrap();
+        // Forget connections that already ended, so the set stays small
+        while tasks.try_join_next().is_some() {}
+        let task_inner = inner.clone();
+        tasks.spawn(async move {
+            let accepted = task_inner.endpoint.finish_accept(incoming).await;
+            // Long transfers must not hold a handshake slot
+            drop(permit);
+            match accepted {
+                Ok(conn) => handle_connection(task_inner, conn).await,
+                Err(e) => tracing::info!("refused a connection: {e:#}"),
             }
-            Err(e) => tracing::info!("refused a connection: {e:#}"),
-        }
+        });
     }
 }
 

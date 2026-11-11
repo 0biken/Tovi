@@ -158,11 +158,20 @@ impl QuicEndpoint {
     /// attempt failed (handshake error, timeout, or [`UnauthorizedPeer`]);
     /// keep calling `accept` for the next one.
     pub async fn accept(&self) -> Option<Result<PeerConnection>> {
-        let incoming = self.endpoint.accept().await?;
+        let incoming = self.accept_incoming().await?;
         Some(self.finish_accept(incoming).await)
     }
 
-    async fn finish_accept(&self, incoming: quinn::Incoming) -> Result<PeerConnection> {
+    /// Wait for the next incoming connection attempt without handshaking it.
+    /// Pass it to [`Self::finish_accept`], ideally on its own task so a slow
+    /// client can't hold up the others. `None` once the endpoint is closed.
+    pub async fn accept_incoming(&self) -> Option<quinn::Incoming> {
+        self.endpoint.accept().await
+    }
+
+    /// Complete the handshake for an incoming attempt and check that the
+    /// device is authorized.
+    pub async fn finish_accept(&self, incoming: quinn::Incoming) -> Result<PeerConnection> {
         let remote = incoming.remote_address();
         let conn = tokio::time::timeout(CONNECT_TIMEOUT, incoming)
             .await

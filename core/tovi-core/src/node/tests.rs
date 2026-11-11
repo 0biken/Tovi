@@ -1,6 +1,7 @@
 //! Two real nodes in one process, talking QUIC over loopback.
 
 use super::*;
+use crate::discovery::{BrowseFuture, Discovery};
 use rand_core::{OsRng, RngCore};
 use std::fs;
 use tokio::sync::broadcast::error::RecvError;
@@ -32,6 +33,53 @@ async fn start(name: &str) -> TestNode {
 async fn start_in(dir: PathBuf, name: &str) -> TestNode {
     let (node, events) = Node::start(config(&dir, name)).await.unwrap();
     TestNode { node, events, dir }
+}
+
+/// Discovery that answers from a fixed list; no multicast needed
+#[derive(Debug, Default)]
+struct FakeDiscovery {
+    found: Mutex<Vec<SocketAddr>>,
+    advertise_fails: bool,
+    advertised: Mutex<Option<u16>>,
+}
+
+impl Discovery for FakeDiscovery {
+    fn advertise(&self, port: u16) -> Result<()> {
+        if self.advertise_fails {
+            bail!("no multicast here");
+        }
+        *self.advertised.lock().unwrap() = Some(port);
+        Ok(())
+    }
+
+    fn stop_advertising(&self) {
+        *self.advertised.lock().unwrap() = None;
+    }
+
+    fn browse(&self, _window: Duration) -> BrowseFuture<'_> {
+        let found = self.found.lock().unwrap().clone();
+        Box::pin(async move { Ok(found) })
+    }
+}
+
+async fn start_with(name: &str, discovery: Arc<FakeDiscovery>) -> TestNode {
+    let dir = temp_dir();
+    let mut config = config(&dir, name);
+    config.discovery = Some(discovery);
+    let (node, events) = Node::start(config).await.unwrap();
+    TestNode { node, events, dir }
+}
+
+/// `phone` (with discovery) pairs with a desktop that then restarts on a new
+/// port, so the address the phone saved is stale
+async fn moved_desktop(phone_fake: &Arc<FakeDiscovery>) -> (TestNode, TestNode) {
+    let mut desktop = start("desktop").await;
+    let phone = start_with("phone", phone_fake.clone()).await;
+    pair(&mut desktop, &phone, true).await.unwrap();
+    let dir = desktop.dir.clone();
+    desktop.node.shutdown().await;
+    drop(desktop);
+    (start_in(dir, "desktop").await, phone)
 }
 
 impl TestNode {
@@ -414,4 +462,184 @@ async fn busy_port_falls_back_to_a_free_one() {
     node.shutdown().await;
     drop(node);
     let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn stalled_handshake_does_not_block_others() {
+    let mut desktop = start("Desk").await;
+    let phone = start("Phone").await;
+    pair(&mut desktop, &phone, true).await.unwrap();
+
+    // A proxy that forwards only the first datagram to the desktop and drops
+    // everything else, so a client's handshake starts but never finishes
+    let desktop_addr = desktop.node.local_addr().unwrap();
+    let proxy = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = proxy.local_addr().unwrap();
+    let proxy_task = tokio::spawn(async move {
+        let mut buf = vec![0u8; 2048];
+        let (n, _) = proxy.recv_from(&mut buf).await.unwrap();
+        proxy.send_to(&buf[..n], desktop_addr).await.unwrap();
+        loop {
+            let _ = proxy.recv_from(&mut buf).await;
+        }
+    });
+
+    let stalled = QuicEndpoint::bind(
+        Arc::new(DeviceIdentity::generate_new()),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        Arc::new(|_: &DeviceId| false),
+    )
+    .unwrap();
+    let desktop_key = desktop.node.device_id().public_key().unwrap();
+    let stalled_task = tokio::spawn(async move { stalled.connect(proxy_addr, &desktop_key).await });
+    // Let the desktop take the stalled incoming connection
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let (source, data) = phone.file("after-stall.bin", 64 * 1024);
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        phone.node.send_file(&desktop.node.device_id(), &source),
+    )
+    .await
+    .expect("send was blocked by a stalled handshake")
+    .unwrap();
+    let outcome = desktop
+        .wait_for(|e| finished_outcome(e, Direction::Received))
+        .await;
+    let TransferOutcome::Completed { path, .. } = outcome else {
+        panic!("receive did not complete: {outcome:?}")
+    };
+    assert_eq!(fs::read(path.unwrap()).unwrap(), data);
+
+    stalled_task.abort();
+    proxy_task.abort();
+    desktop.stop().await;
+    phone.stop().await;
+}
+
+#[tokio::test]
+async fn send_finds_moved_device() {
+    let fake = Arc::new(FakeDiscovery::default());
+    let (desktop, phone) = moved_desktop(&fake).await;
+    let desktop_addr = desktop.node.local_addr().unwrap();
+    *fake.found.lock().unwrap() = vec![desktop_addr];
+
+    let (source, data) = phone.file("moved.txt", 2000);
+    let desktop_id = desktop.node.device_id();
+    phone.node.send_file(&desktop_id, &source).await.unwrap();
+    assert_eq!(
+        fs::read(desktop.dir.join("inbox").join("moved.txt")).unwrap(),
+        data
+    );
+    let saved = phone.node.store().device_addresses(&desktop_id).unwrap();
+    assert_eq!(saved[0], desktop_addr);
+
+    desktop.stop().await;
+    phone.stop().await;
+}
+
+#[tokio::test]
+async fn moved_device_address_list_stays_capped() {
+    let fake = Arc::new(FakeDiscovery::default());
+    let (desktop, phone) = moved_desktop(&fake).await;
+    let desktop_addr = desktop.node.local_addr().unwrap();
+    let desktop_id = desktop.node.device_id();
+    let stale: Vec<SocketAddr> = (0..8)
+        .map(|i| SocketAddr::from(([127, 0, 0, 1], 9 + i)))
+        .collect();
+    phone
+        .node
+        .store()
+        .set_device_addresses(&desktop_id, &stale)
+        .unwrap();
+    *fake.found.lock().unwrap() = vec![desktop_addr];
+
+    let (source, _) = phone.file("capped.txt", 500);
+    phone.node.send_file(&desktop_id, &source).await.unwrap();
+    let saved = phone.node.store().device_addresses(&desktop_id).unwrap();
+    assert!(saved.len() <= 8, "{saved:?}");
+    assert_eq!(saved[0], desktop_addr);
+
+    desktop.stop().await;
+    phone.stop().await;
+}
+
+#[tokio::test]
+async fn send_skips_own_and_stranger_adverts() {
+    let fake = Arc::new(FakeDiscovery::default());
+    let (desktop, phone) = moved_desktop(&fake).await;
+    let stranger = start("stranger").await;
+    *fake.found.lock().unwrap() = vec![
+        phone.node.local_addr().unwrap(),
+        stranger.node.local_addr().unwrap(),
+        desktop.node.local_addr().unwrap(),
+    ];
+
+    let (source, data) = phone.file("picky.txt", 1500);
+    phone
+        .node
+        .send_file(&desktop.node.device_id(), &source)
+        .await
+        .unwrap();
+    assert_eq!(
+        fs::read(desktop.dir.join("inbox").join("picky.txt")).unwrap(),
+        data
+    );
+    assert!(
+        !stranger.dir.join("inbox").exists()
+            || fs::read_dir(stranger.dir.join("inbox")).unwrap().count() == 0
+    );
+
+    desktop.stop().await;
+    phone.stop().await;
+    stranger.stop().await;
+}
+
+#[tokio::test]
+async fn send_fails_cleanly_when_discovery_finds_nothing() {
+    let fake = Arc::new(FakeDiscovery::default());
+    let (desktop, mut phone) = moved_desktop(&fake).await;
+
+    let (source, _) = phone.file("lost.txt", 100);
+    let result = tokio::time::timeout(
+        Duration::from_secs(15),
+        phone.node.send_file(&desktop.node.device_id(), &source),
+    )
+    .await
+    .expect("send_file took too long");
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string().contains("not found on this network"),
+        "{err:#}"
+    );
+    let outcome = phone
+        .wait_for(|e| finished_outcome(e, Direction::Sent))
+        .await;
+    assert!(matches!(outcome, TransferOutcome::Interrupted { .. }));
+
+    desktop.stop().await;
+    phone.stop().await;
+}
+
+#[tokio::test]
+async fn start_survives_advertise_failure() {
+    let fake = Arc::new(FakeDiscovery {
+        advertise_fails: true,
+        ..Default::default()
+    });
+    let node = start_with("Phone", fake).await;
+    node.stop().await;
+}
+
+#[tokio::test]
+async fn listening_node_advertises_its_port() {
+    let fake = Arc::new(FakeDiscovery::default());
+    let node = start_with("Desk", fake.clone()).await;
+    assert_eq!(
+        *fake.advertised.lock().unwrap(),
+        Some(node.node.local_addr().unwrap().port())
+    );
+    node.node.shutdown().await;
+    assert_eq!(*fake.advertised.lock().unwrap(), None);
+    node.stop().await;
 }
