@@ -1,0 +1,32 @@
+[package]
+name = "tovi-ffi"
+version = "0.1.0"
+edition = "2021"
+description = "UniFFI bindings over tovi-core for the mobile apps (decisions.md D4)"
+
+[lib]
+name = "tovi_ffi"
+# cdylib: libtovi_ffi.so for Android; lib: for the Rust tests and the bindgen
+crate-type = ["cdylib", "lib"]
+
+[[bin]]
+# Generates the Kotlin bindings from the built library:
+#   cargo run -p tovi-ffi --features cli --bin uniffi-bindgen -- generate \
+#     --library <path to libtovi_ffi> --language kotlin --out-dir <dir>
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["cli"]
+
+[features]
+cli = ["uniffi/cli"]
+
+[dependencies]
+tovi-core = { path = "../tovi-core" }
+uniffi = "0.32"
+tokio = { version = "1.37", features = ["full"] }
+anyhow = "1.0"
+thiserror = "2"
+tracing = "0.1"
+
+[dev-dependencies]
+rand_core = { version = "0.6", features = ["getrandom"] }

@@ -1,5 +1,8 @@
-use base64::Engine;
+use super::devices::Device;
+use super::{message, CommandResult};
 use serde::Serialize;
+use tauri::State;
+use tovi_core::node::Node;
 
 #[derive(Serialize)]
 pub struct LocalIdInfo {
@@ -9,48 +12,54 @@ pub struct LocalIdInfo {
 
 #[derive(Serialize)]
 pub struct QrPayload {
-    pub payload: String, // base64-encoded QR content string
-    pub expires_at: u64, // Unix timestamp (seconds)
+    /// The `tovi://pair/...` link; render it as a QR code
+    pub payload: String,
+    /// Unix seconds
+    pub expires_at: u64,
 }
 
-/// Returns this device's public identity (device_id and name).
+/// This device's identity
 #[tauri::command]
-pub async fn get_local_id() -> Result<LocalIdInfo, String> {
-    // TODO: load from tovi-core identity store
-    Ok(LocalIdInfo {
-        device_id: "placeholder-device-id".to_string(),
-        device_name: hostname::get()
-            .map(|h| h.to_string_lossy().to_string())
-            .unwrap_or_else(|_| "My Desktop".to_string()),
-    })
+pub fn get_local_id(node: State<'_, Node>) -> LocalIdInfo {
+    LocalIdInfo {
+        device_id: node.device_id().to_string(),
+        device_name: node.device_name().to_string(),
+    }
 }
 
-/// Generates a short-lived QR pairing token for a phone to scan.
+/// Open a pairing session and return its code (valid for 60 seconds)
 #[tauri::command]
-pub async fn generate_qr() -> Result<QrPayload, String> {
-    let expires_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        + 60; // 60-second validity window
-
-    // TODO: generate real ephemeral TVP session token from tovi-core pairing module
-    let raw_payload = format!(
-        "{{\"v\":1,\"device\":\"placeholder-id\",\"expires\":{}}}",
-        expires_at
-    );
-    let payload = base64::engine::general_purpose::STANDARD.encode(raw_payload.as_bytes());
-
+pub fn generate_qr(node: State<'_, Node>) -> CommandResult<QrPayload> {
+    let code = node.new_pairing_code().map_err(message)?;
     Ok(QrPayload {
-        payload,
-        expires_at,
+        payload: code.to_uri().map_err(message)?,
+        expires_at: code.expires_at,
     })
 }
 
-/// Called by the frontend with a scanned QR code string to complete pairing.
+/// Pair with another device using its code (pasted link)
 #[tauri::command]
-pub async fn pair_with_code(code: String) -> Result<(), String> {
-    // TODO: delegate to tovi-core pairing module
-    tracing::info!("Pairing with code: {}", code);
-    Ok(())
+pub async fn pair_with_code(node: State<'_, Node>, code: String) -> CommandResult<Device> {
+    let device = node.pair(&code).await.map_err(message)?;
+    let address = node
+        .devices()
+        .map_err(message)?
+        .into_iter()
+        .find(|d| d.device.id == device.id)
+        .and_then(|d| d.addresses.first().map(|a| a.to_string()));
+    Ok(Device {
+        id: device.id.to_string(),
+        name: device.name,
+        platform: device.platform,
+        paired_at: 0,
+        last_seen: None,
+        address,
+    })
+}
+
+/// Answer a `pairing:request` or `transfer:incoming` event. Returns false if
+/// the request already expired.
+#[tauri::command]
+pub fn respond(node: State<'_, Node>, request_id: u64, allow: bool) -> bool {
+    node.respond(request_id, allow)
 }

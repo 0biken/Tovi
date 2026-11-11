@@ -136,6 +136,11 @@ fn chunk_len(file_size: u64, chunk_size: u32, index: u64) -> usize {
     (file_size - offset).min(u64::from(chunk_size)) as usize
 }
 
+/// The 32-character hex form of a transfer ID
+pub fn transfer_id_hex(id: &TransferId) -> String {
+    hex(id)
+}
+
 fn hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for b in bytes {

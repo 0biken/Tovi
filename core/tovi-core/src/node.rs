@@ -341,6 +341,11 @@ impl Node {
     /// Save a new receive folder; it applies to the next transfer. Partial
     /// files of interrupted transfers stay in the old folder.
     pub fn set_receive_dir(&self, dir: &Path) -> Result<()> {
+        // A relative path would silently resolve against the app's working folder
+        anyhow::ensure!(
+            dir.is_absolute(),
+            "the receive folder must be a full path, not a relative one"
+        );
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         // Not canonicalize(): on Windows that yields verbatim `\\?\C:\...` paths
         let dir = std::path::absolute(dir)?;

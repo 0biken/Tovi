@@ -76,7 +76,8 @@ pub enum TransferStatus {
 }
 
 impl Direction {
-    fn as_str(self) -> &'static str {
+    /// "sent" | "received"
+    pub fn as_str(self) -> &'static str {
         match self {
             Direction::Sent => "sent",
             Direction::Received => "received",
