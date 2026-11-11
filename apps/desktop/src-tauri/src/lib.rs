@@ -1,7 +1,9 @@
 mod commands;
 mod events;
 
+use std::sync::Arc;
 use tauri::{Manager, RunEvent};
+use tovi_core::discovery::{Discovery, MdnsDiscovery};
 use tovi_core::node::{Node, NodeConfig};
 use tovi_core::protocol::MAX_DEVICE_NAME_LEN;
 
@@ -24,7 +26,14 @@ pub fn run() {
                 .download_dir()
                 .map(|dir| dir.join("TOVI"))
                 .unwrap_or_else(|_| data_dir.join("Received"));
-            let config = NodeConfig::new(data_dir, device_name(), receive_dir);
+            let mut config = NodeConfig::new(data_dir, device_name(), receive_dir);
+            config.discovery = match MdnsDiscovery::new() {
+                Ok(discovery) => Some(Arc::new(discovery) as Arc<dyn Discovery>),
+                Err(err) => {
+                    tracing::warn!("discovery unavailable, running without it: {err:#}");
+                    None
+                }
+            };
             let (node, events) = tauri::async_runtime::block_on(Node::start(config))?;
             tauri::async_runtime::spawn(events::forward(app.handle().clone(), events));
             app.manage(node);

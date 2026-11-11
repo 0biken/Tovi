@@ -73,8 +73,9 @@ Notes:
 - To run two instances on one machine, give each its own data folder: `--data-dir <folder>`.
 - The identity key and the database (`tovi.db`: paired devices, history) live in the OS data
   folder (`%APPDATA%\TOVI` on Windows). Development builds keep the key **unencrypted**.
-- A paired device is reached at its last known address. If that changes (for example a new
-  address from the router), pair again; automatic discovery is not built yet.
+- A paired device is tried at its last known address first. If that changes (for example a new
+  address from the router), `send` looks for it on the same network and reconnects. This needs
+  the Windows firewall to allow TOVI on **private** networks, too.
 - If the connection drops mid-transfer, `send` reconnects for up to 2 minutes and resumes where it
   left off. If it gives up, running the same `send` again resumes too. The partial file waits in
   the receive folder as `<name>.<id>.tovi.part` with a `.tovi.state` file beside it.
