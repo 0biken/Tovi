@@ -135,11 +135,11 @@ Decisions are recorded in [`architecture/decisions.md`](architecture/decisions.m
 
 - [x] UniFFI bindings for `tovi-core` (`core/tovi-ffi`: `ToviNode`, `EventListener`; host tests, Android build untested)
 - [x] Kotlin + Compose app skeleton (`apps/android`: pairing by pasted code, send via file picker, transfers, settings; tested on an Android 16 phone)
-- [ ] NSD discovery adapter + `MulticastLock`
+- [ ] Discovery on Android (Rust mDNS + MulticastLock; NsdManager fallback if it fails on devices). Unticked until the phone check passes
 - [x] QR scanner (CameraX + ML Kit; `tovi://pair` links fill in the code but need a tap)
-- [ ] Share-sheet intent ("Share → TOVI")
-- [ ] Foreground service for active transfers; notifications
-- [ ] Permissions per API level (`NEARBY_WIFI_DEVICES` on 13+)
+- [x] Share-sheet intent ("Share → TOVI") (not yet run on a device)
+- [x] Foreground service for active transfers; notifications (not yet run on a device)
+- [x] Permissions per API level (`POST_NOTIFICATIONS` on 13+, foreground-service `dataSync`, multicast; `NEARBY_WIFI_DEVICES` is only needed for Wi-Fi Direct/Aware later) (not yet run on a device)
 - [ ] Android → Windows and Android → macOS 2 GB transfer (the milestone)
 
 ## 12. Desktop app (Sprint 2)

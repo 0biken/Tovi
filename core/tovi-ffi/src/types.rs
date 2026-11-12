@@ -15,6 +15,9 @@ pub struct NodeConfig {
     pub default_receive_dir: String,
     /// Where to listen, e.g. "127.0.0.1:0"; None for the default port on all interfaces
     pub listen: Option<String>,
+    /// Find paired devices on the local network after their address changes (mDNS)
+    #[uniffi(default = false)]
+    pub discovery: bool,
 }
 
 /// This device's identity

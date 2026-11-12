@@ -42,6 +42,7 @@ impl Phone {
                 device_name: "Test Phone".into(),
                 default_receive_dir: dir.join("phone-inbox").to_string_lossy().into_owned(),
                 listen: Some("127.0.0.1:0".into()),
+                discovery: false,
             },
             Arc::new(ChannelListener(Mutex::new(tx))),
         )
@@ -278,8 +279,33 @@ fn start_rejects_a_relative_receive_folder() {
             device_name: "Phone".into(),
             default_receive_dir: "Downloads/TOVI".into(),
             listen: Some("127.0.0.1:0".into()),
+            discovery: false,
         },
         Arc::new(ChannelListener(Mutex::new(tx))),
     );
     assert!(matches!(result, Err(ToviError::InvalidArgument { .. })));
+}
+
+#[test]
+fn discovery_node_starts_and_stops() {
+    let dir = temp_dir();
+    let (tx, _events) = mpsc::channel();
+    let node = ToviNode::start(
+        NodeConfig {
+            data_dir: dir.join("phone").to_string_lossy().into_owned(),
+            device_name: "Phone".into(),
+            default_receive_dir: dir.join("phone-inbox").to_string_lossy().into_owned(),
+            listen: Some("127.0.0.1:0".into()),
+            discovery: true,
+        },
+        Arc::new(ChannelListener(Mutex::new(tx))),
+    )
+    .unwrap();
+    assert!(node.port().is_ok());
+
+    let rt = Runtime::new().unwrap();
+    let started = std::time::Instant::now();
+    rt.block_on(node.shutdown());
+    assert!(started.elapsed() < Duration::from_secs(5));
+    let _ = fs::remove_dir_all(&dir);
 }

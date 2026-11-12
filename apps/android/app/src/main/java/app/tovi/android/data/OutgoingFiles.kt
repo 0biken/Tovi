@@ -3,9 +3,19 @@ package app.tovi.android.data
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
+import app.tovi.android.share.isShareableUri
 import java.io.File
 import java.io.FileNotFoundException
 import java.io.IOException
+
+/** Run [block]; if it throws (cancellation included), remove [dir] with any partial copy in it, then rethrow */
+internal fun <T> deletingOnFailure(dir: File, block: () -> T): T =
+  try {
+    block()
+  } catch (e: Throwable) {
+    dir.deleteRecursively()
+    throw e
+  }
 
 /** Copies picked or shared `content://` documents to files the core can read by path */
 object OutgoingFiles {
@@ -14,6 +24,7 @@ object OutgoingFiles {
    * the original file name. Throws if it can't be read or doesn't fit.
    */
   fun copyToCache(context: Context, uri: Uri): File {
+    if (!isShareableUri(uri.scheme)) throw IOException("only content documents can be sent")
     val resolver = context.contentResolver
     var name: String? = null
     var size: Long? = null
@@ -24,11 +35,13 @@ object OutgoingFiles {
       }
     }
     val dir = File(context.cacheDir, "outgoing/${System.nanoTime()}").apply { mkdirs() }
-    size?.let { if (it > dir.usableSpace) throw IOException("not enough free space to prepare it") }
-    val target = File(dir, safeName(name ?: uri.lastPathSegment ?: "file"))
-    val input = resolver.openInputStream(uri) ?: throw FileNotFoundException(uri.toString())
-    input.use { source -> target.outputStream().use { source.copyTo(it, bufferSize = 1 shl 20) } }
-    return target
+    return deletingOnFailure(dir) {
+      size?.let { if (it > dir.usableSpace) throw IOException("not enough free space to prepare it") }
+      val target = File(dir, safeName(name ?: uri.lastPathSegment ?: "file"))
+      val input = resolver.openInputStream(uri) ?: throw FileNotFoundException("it can no longer be opened")
+      input.use { source -> target.outputStream().use { source.copyTo(it, bufferSize = 1 shl 20) } }
+      target
+    }
   }
 
   /** Keep only the last path component; the receiver sanitizes it again */

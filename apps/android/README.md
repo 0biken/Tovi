@@ -37,8 +37,61 @@ of the core is large and slow.
   pending requests (unit tested).
 - `data/OutgoingFiles`: copies picked `content://` documents into the cache,
   since the core reads files by path.
+- `data/SendQueue`: one FIFO queue for every send (picker and share). One
+  file is copied to the cache at a time, and a file that fails doesn't stop
+  the rest.
+- `service/TransferService`: foreground service (type `dataSync`) that runs
+  while the queue is non-empty, with a progress notification. When the queue
+  drains and the app isn't visible it posts one summary notification. It
+  handles the Android 15 `dataSync` time cap in `onTimeout`.
+- `data/MulticastLockHolder`: holds the Wi-Fi multicast lock while the app is
+  visible or the queue is non-empty.
+- `share/ShareActivity`: Share → TOVI from any app.
 - `ui/`: Devices, Transfers, Settings and Pair screens, plus the dialog that
   answers pairing and incoming-file requests.
+
+## Background sends, sharing and discovery
+
+- Sends run in the foreground service, so they continue with the screen off
+  or the app in the background. Notification permission is asked on the first
+  send; denying it doesn't block sending (a one-time hint is shown).
+- Share → TOVI accepts `content://` URIs only (`file://` is rejected) and at
+  most 200 files per share. The URIs reach the service through ClipData with a
+  read grant.
+- Discovery uses the Rust mDNS stack (the app sets `discovery = true` in
+  `NodeConfig`), as on desktop and the CLI. Android drops multicast packets
+  unless a multicast lock is held, hence `MulticastLockHolder`.
+- Permissions: `POST_NOTIFICATIONS`, `FOREGROUND_SERVICE`,
+  `FOREGROUND_SERVICE_DATA_SYNC`, `CHANGE_WIFI_MULTICAST_STATE`.
+  `NEARBY_WIFI_DEVICES` isn't requested; it would only matter for Wi-Fi
+  Direct/Aware.
+
+### Known limitations
+
+- Send only: nothing is received while the app is closed.
+- Files are still copied into the app cache before sending, so a 2 GB send
+  needs 2 GB free. The copy is deleted when the send ends, so a send that
+  gives up after the reconnect window can't resume across an app restart.
+- No pause or cancel.
+- None of the service, notification, share or discovery behaviour has been run
+  on a physical device yet.
+
+### Checking on a phone
+
+1. Send 2 GB to the desktop with the screen off and the app swiped away, and
+   confirm it completes.
+2. Toggle Wi‑Fi mid-send and confirm it resumes.
+3. Share 3 files from the Files app and confirm they send in order.
+4. Restart the desktop's TOVI on another port, then send, and confirm the phone
+   finds it through discovery.
+5. Deny notifications and confirm the send still completes.
+
+For check 3, use three large files (for example 3 × ~1 GB), so the last one is
+read minutes after the share and the read grant has to last that long.
+
+Check 4 gates `discovery = true` and the multicast lock. If it fails, set
+`discovery = false` in `NodeRepository.config()` and bring the `NsdManager`
+fallback back as its own decision.
 
 ## Testing against the desktop app
 
