@@ -10,3 +10,12 @@ fun <T> sharedStreams(action: String?, single: T?, multiple: List<T?>?): List<T>
     ACTION_SEND_MULTIPLE -> multiple.orEmpty().filterNotNull()
     else -> emptyList()
   }
+
+/** At most this many files per share; the grant list rides in one binder transaction */
+const val MAX_SHARED_FILES = 200
+
+/**
+ * Only `content://` documents are readable on the sender's behalf. A `file://`
+ * URI would be opened with TOVI's own permissions, including its private data.
+ */
+fun isShareableUri(scheme: String?): Boolean = scheme.equals("content", ignoreCase = true)

@@ -12,6 +12,7 @@ import android.content.pm.ServiceInfo
 import android.net.Uri
 import android.os.IBinder
 import android.util.Log
+import app.tovi.android.share.isShareableUri
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
@@ -135,8 +136,9 @@ class TransferService : Service() {
     /**
      * Start the service. With [shared] it also queues those files for
      * [deviceId]; the grant on the intent keeps them readable until it stops.
+     * Returns false when the system refused to start it.
      */
-    fun start(context: Context, shared: List<Uri> = emptyList(), deviceId: String? = null, deviceName: String? = null) {
+    fun start(context: Context, shared: List<Uri> = emptyList(), deviceId: String? = null, deviceName: String? = null): Boolean {
       val intent = Intent(context, TransferService::class.java)
       if (shared.isNotEmpty()) {
         val clip = ClipData.newRawUri("shared", shared.first())
@@ -148,14 +150,16 @@ class TransferService : Service() {
       }
       try {
         ContextCompat.startForegroundService(context, intent)
+        return true
       } catch (e: RuntimeException) {
-        // Not allowed to start from the background; the send still runs while the process lives
+        // Not allowed to start from the background, or the grant was refused; the caller decides what to tell the user
         Log.w(TAG, "could not start the transfer service", e)
+        return false
       }
     }
 
     private fun Intent.sharedUris(): List<Uri> =
-      clipData?.let { clip -> (0 until clip.itemCount).mapNotNull { clip.getItemAt(it).uri } }.orEmpty()
+      clipData?.let { clip -> (0 until clip.itemCount).mapNotNull { clip.getItemAt(it).uri }.filter { isShareableUri(it.scheme) } }.orEmpty()
 
     /** Idempotent: creating an existing channel changes nothing */
     fun ensureChannels(context: Context) {

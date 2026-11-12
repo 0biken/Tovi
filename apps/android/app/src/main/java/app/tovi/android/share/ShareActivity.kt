@@ -43,12 +43,14 @@ import app.tovi.core.Device
 class ShareActivity : ComponentActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
-    val uris = streamsOf(intent)
+    val all = streamsOf(intent).filter { isShareableUri(it.scheme) }
+    val uris = all.take(MAX_SHARED_FILES)
     if (uris.isEmpty()) {
       finish()
       return
     }
     val repository = (application as ToviApp).repository
+    val note = if (all.size > uris.size) "Only the first $MAX_SHARED_FILES of ${all.size} files will be sent" else null
     val title = if (uris.size == 1) "Send ${displayName(uris[0])} to…" else "Send ${uris.size} files to…"
 
     setContent {
@@ -56,9 +58,10 @@ class ShareActivity : ComponentActivity() {
         val devices by repository.devices.collectAsStateWithLifecycle()
         val chosen = remember { mutableStateOf<Device?>(null) }
 
+        val failed = remember { mutableStateOf(false) }
+
         fun send(device: Device) {
-          TransferService.start(this, uris, device.id, device.name)
-          finish()
+          if (TransferService.start(this, uris, device.id, device.name)) finish() else failed.value = true
         }
 
         // Asked once, before the first send; a refusal never blocks it
@@ -74,7 +77,7 @@ class ShareActivity : ComponentActivity() {
               finish()
             })
           } else {
-            DevicePicker(title, devices) { device ->
+            DevicePicker(title, note, failed.value, devices) { device ->
               chosen.value = device
               if (shouldAskNotifications(this)) {
                 getSharedPreferences(UI_PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_ASKED, true).apply()
@@ -115,9 +118,18 @@ class ShareActivity : ComponentActivity() {
 }
 
 @Composable
-private fun DevicePicker(title: String, devices: List<Device>, onChoose: (Device) -> Unit) {
+private fun DevicePicker(title: String, note: String?, failed: Boolean, devices: List<Device>, onChoose: (Device) -> Unit) {
   Column(Modifier.padding(vertical = 16.dp)) {
     Text(title, style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+    note?.let { Text(it, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) }
+    if (failed) {
+      Text(
+        "Couldn't start the send",
+        color = MaterialTheme.colorScheme.error,
+        style = MaterialTheme.typography.bodyMedium,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+      )
+    }
     LazyColumn {
       items(devices, key = { it.id }) { device ->
         ListItem(headlineContent = { Text(device.name) }, modifier = Modifier.clickable { onChoose(device) })

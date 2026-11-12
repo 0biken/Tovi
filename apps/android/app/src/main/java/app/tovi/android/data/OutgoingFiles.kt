@@ -3,6 +3,7 @@ package app.tovi.android.data
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
+import app.tovi.android.share.isShareableUri
 import java.io.File
 import java.io.FileNotFoundException
 import java.io.IOException
@@ -14,6 +15,7 @@ object OutgoingFiles {
    * the original file name. Throws if it can't be read or doesn't fit.
    */
   fun copyToCache(context: Context, uri: Uri): File {
+    if (!isShareableUri(uri.scheme)) throw IOException("only content documents can be sent")
     val resolver = context.contentResolver
     var name: String? = null
     var size: Long? = null
