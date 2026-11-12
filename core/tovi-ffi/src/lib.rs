@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::runtime::Runtime;
 use tokio::task::JoinHandle;
+use tovi_core::discovery::{Discovery, MdnsDiscovery};
 use tovi_core::identity::DeviceId;
 use tovi_core::node::{self, Node};
 use tovi_core::protocol::MAX_DEVICE_NAME_LEN;
@@ -67,6 +68,15 @@ impl ToviNode {
             core_config.listen = listen
                 .parse::<SocketAddr>()
                 .map_err(|e| ToviError::invalid(format!("bad listen address {listen:?}: {e}")))?;
+        }
+        if config.discovery {
+            core_config.discovery = match MdnsDiscovery::new() {
+                Ok(discovery) => Some(Arc::new(discovery) as Arc<dyn Discovery>),
+                Err(err) => {
+                    tracing::warn!("discovery unavailable, running without it: {err:#}");
+                    None
+                }
+            };
         }
 
         let runtime = tokio::runtime::Builder::new_multi_thread()
