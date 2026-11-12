@@ -37,5 +37,11 @@ fun summaryText(batch: List<ItemResult>): SummaryText {
   return SummaryText(title, null)
 }
 
+/**
+ * How long to wait after a run ends before deciding whether the app is on screen:
+ * the lifecycle only reports a stop about 700 ms after the last activity stops
+ */
+const val SUMMARY_SETTLE_MS = 1200L
+
 /** While the app is on screen the snackbar already says it */
 fun shouldPostSummary(appVisible: Boolean): Boolean = !appVisible

@@ -130,6 +130,8 @@ class NodeRepository(private val context: Context, private val scope: CoroutineS
         call { it.sendFile(deviceId, path) }.getOrThrow()
       },
       cleanup = { path -> withContext(Dispatchers.IO + NonCancellable) { File(path).parentFile?.deleteRecursively() } },
+      // Nothing reaches the core for such an item, so history never shows it: say so now
+      onPrepareFailed = { result -> result.error?.let { _notices.trySend(it) } },
     )
 
   /** What the send queue is doing right now */

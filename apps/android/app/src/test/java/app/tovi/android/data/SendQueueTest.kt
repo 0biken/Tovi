@@ -89,6 +89,68 @@ class SendQueueTest {
   }
 
   @Test
+  fun prepareFailureIsReportedToTheCallback() = runTest {
+    val a = item("a.txt")
+    val reported = mutableListOf<ItemResult>()
+    val queue =
+      SendQueue(
+        scope = backgroundScope,
+        prepare = { throw FileNotFoundException("gone") },
+        send = { _, _ -> },
+        cleanup = {},
+        onPrepareFailed = { reported += it },
+      )
+    queue.enqueue(listOf(a))
+    runCurrent()
+
+    assertEquals(listOf(ItemResult(a, "Could not read a.txt: gone")), reported)
+  }
+
+  @Test
+  fun throwingCleanupDoesNotStopTheQueue() = runTest {
+    val items = listOf(item("a.txt"), item("b.txt"))
+    val queue =
+      SendQueue(
+        scope = backgroundScope,
+        prepare = { it.fileName },
+        send = { _, _ -> },
+        cleanup = { throw java.io.IOException("busy") },
+      )
+    val batches = mutableListOf<List<ItemResult>>()
+    backgroundScope.launch { queue.batches.collect { batches += it } }
+    runCurrent()
+
+    queue.enqueue(items)
+    runCurrent()
+
+    assertEquals(listOf(ItemResult(items[0], null), ItemResult(items[1], null)), batches.single())
+    assertNull(queue.state.value.current)
+  }
+
+  @Test
+  fun cancelledWorkerLeavesTheQueueInactive() = runTest {
+    val a = item("a.txt")
+    val scope = CoroutineScope(SupervisorJob())
+    val started = CompletableDeferred<Unit>()
+    val queue =
+      SendQueue(
+        scope = scope,
+        prepare = { it.fileName },
+        send = { _, _ ->
+          started.complete(Unit)
+          CompletableDeferred<Unit>().await()
+        },
+        cleanup = {},
+      )
+    queue.enqueue(listOf(a))
+    started.await()
+    scope.cancel()
+    scope.coroutineContext[kotlinx.coroutines.Job]!!.join()
+
+    assertEquals(false, queue.state.value.isActive)
+  }
+
+  @Test
   fun sendFailureIsRecordedAndCleanupStillRuns() = runTest {
     val a = item("a.txt")
     val cleaned = mutableListOf<String>()

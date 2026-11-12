@@ -86,6 +86,9 @@ of the core is large and slow.
    finds it through discovery.
 5. Deny notifications and confirm the send still completes.
 
+For check 3, use three large files (for example 3 × ~1 GB), so the last one is
+read minutes after the share and the read grant has to last that long.
+
 Check 4 gates `discovery = true` and the multicast lock. If it fails, set
 `discovery = false` in `NodeRepository.config()` and bring the `NsdManager`
 fallback back as its own decision.

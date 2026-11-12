@@ -5,12 +5,14 @@ import app.tovi.android.data.MulticastLockHolder
 import app.tovi.android.data.NodeRepository
 import app.tovi.android.data.OutgoingFiles
 import app.tovi.android.data.wifiMulticastLock
+import app.tovi.android.service.SUMMARY_SETTLE_MS
 import app.tovi.android.service.TransferService
 import app.tovi.android.service.shouldPostSummary
 import app.tovi.android.service.summaryText
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
@@ -36,8 +38,14 @@ class ToviApp : Application() {
     // batches has no replay: collect from process start, or a summary could be lost
     appScope.launch {
       repository.batches.collect { batch ->
-        if (batch.isNotEmpty() && shouldPostSummary(AppVisibility.visible.value)) {
-          TransferService.postSummary(this@ToviApp, summaryText(batch))
+        if (batch.isEmpty()) return@collect
+        // Its own coroutine, so waiting never delays the next batch
+        launch {
+          // Right after the app is closed it still reads as visible; let that settle
+          delay(SUMMARY_SETTLE_MS)
+          if (shouldPostSummary(AppVisibility.visible.value)) {
+            TransferService.postSummary(this@ToviApp, summaryText(batch))
+          }
         }
       }
     }

@@ -69,4 +69,10 @@ class TransferNotificationsTest {
     assertFalse(shouldPostSummary(true))
     assertTrue(shouldPostSummary(false))
   }
+
+  @Test
+  fun summaryWaitsLongerThanTheLifecycleStopDelay() {
+    // ProcessLifecycleOwner reports a stop ~700 ms after the last activity stops
+    assertTrue(SUMMARY_SETTLE_MS >= 1000L)
+  }
 }

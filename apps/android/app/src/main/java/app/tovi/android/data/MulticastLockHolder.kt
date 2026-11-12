@@ -2,6 +2,7 @@ package app.tovi.android.data
 
 import android.content.Context
 import android.net.wifi.WifiManager
+import android.util.Log
 
 /** Something that can be held and let go of, so the rule below is testable without Android */
 interface LockHandle {
@@ -32,12 +33,13 @@ fun wifiMulticastLock(context: Context): LockHandle {
   val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
   val lock = wifi?.createMulticastLock("tovi")?.apply { setReferenceCounted(false) }
   return object : LockHandle {
+    // A SecurityException (say, the permission was revoked) must not end the collector that calls these
     override fun acquire() {
-      lock?.acquire()
+      runCatching { lock?.acquire() }.onFailure { Log.w("Tovi", "could not hold the multicast lock", it) }
     }
 
     override fun release() {
-      lock?.release()
+      runCatching { lock?.release() }.onFailure { Log.w("Tovi", "could not release the multicast lock", it) }
     }
 
     override val isHeld: Boolean get() = lock?.isHeld ?: false

@@ -34,6 +34,8 @@ class SendQueue(
   private val prepare: suspend (QueueItem) -> String,
   private val send: suspend (deviceId: String, path: String) -> Unit,
   private val cleanup: suspend (path: String) -> Unit,
+  /** Called for an item that failed before it could be sent, so the UI can say so at once */
+  private val onPrepareFailed: (ItemResult) -> Unit = {},
 ) {
   private val lock = Any()
   private val _state = MutableStateFlow(QueueState())
@@ -58,6 +60,19 @@ class SendQueue(
   }
 
   private suspend fun drain() {
+    var finished = false
+    try {
+      drainLoop()
+      finished = true
+    } finally {
+      // The worker was cancelled or died mid-run: leave the queue idle rather than
+      // active forever. No batch is emitted for the unfinished run (the service's
+      // own summary logic is not told of a half run); the next enqueue starts fresh.
+      if (!finished) synchronized(lock) { _state.value = QueueState() }
+    }
+  }
+
+  private suspend fun drainLoop() {
     while (true) {
       // Taking the next item, or going idle, is one step under the lock: an
       // enqueue either lands before it (and is taken here) or sees an idle queue
@@ -99,7 +114,7 @@ class SendQueue(
       } catch (e: CancellationException) {
         throw e
       } catch (e: Exception) {
-        return ItemResult(item, "Could not read ${item.fileName}: ${e.message}")
+        return ItemResult(item, "Could not read ${item.fileName}: ${e.message}").also(onPrepareFailed)
       }
     return try {
       send(item.deviceId, path)
@@ -109,7 +124,14 @@ class SendQueue(
     } catch (e: Exception) {
       ItemResult(item, e.message ?: "Send failed")
     } finally {
-      cleanup(path)
+      // A cleanup that throws must not take the worker down with it
+      try {
+        cleanup(path)
+      } catch (e: CancellationException) {
+        throw e
+      } catch (_: Exception) {
+        // leftovers are cleared at the next start
+      }
     }
   }
 }

@@ -51,12 +51,20 @@ class TransferService : Service() {
     repository = (application as ToviApp).repository
     ensureChannels(this)
     // Straight away: the system kills the app if this is late
-    ServiceCompat.startForeground(
-      this,
-      ID_PROGRESS,
-      progressNotification(this, progressText(repository.queue.value, currentSend())),
-      ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
-    )
+    try {
+      ServiceCompat.startForeground(
+        this,
+        ID_PROGRESS,
+        progressNotification(this, progressText(repository.queue.value, currentSend())),
+        ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+      )
+    } catch (e: RuntimeException) {
+      // E.g. ForegroundServiceStartNotAllowedException, or the dataSync time budget is spent.
+      // The queue keeps going while the process lives; its batch summary still reports the outcome.
+      Log.w(TAG, "could not go to the foreground", e)
+      stopSelfResult(lastStartId)
+      return START_NOT_STICKY
+    }
 
     val shared = intent?.sharedUris().orEmpty()
     val deviceId = intent?.getStringExtra(EXTRA_DEVICE_ID)
@@ -113,7 +121,7 @@ class TransferService : Service() {
     Log.w(TAG, "foreground service timed out")
     updates?.cancel()
     ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
-    stopSelf()
+    stopSelfResult(lastStartId)
   }
 
   override fun onDestroy() {
