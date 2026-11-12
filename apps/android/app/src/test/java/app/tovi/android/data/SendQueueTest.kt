@@ -1,7 +1,13 @@
 package app.tovi.android.data
 
 import java.io.FileNotFoundException
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runCurrent
@@ -121,5 +127,54 @@ class SendQueueTest {
     runCurrent()
 
     assertEquals(listOf(listOf(ItemResult(a, null)), listOf(ItemResult(b, null))), batches)
+  }
+
+  @Test
+  fun enqueueFromInsideTheLastItemsSendIsStillProcessed() = runTest {
+    val a = item("a.txt")
+    val b = item("b.txt")
+    val sent = mutableListOf<String>()
+    lateinit var queue: SendQueue
+    queue =
+      SendQueue(
+        scope = backgroundScope,
+        prepare = { it.fileName },
+        send = { _, path ->
+          sent += path
+          if (path == "a.txt") queue.enqueue(listOf(b))
+        },
+        cleanup = {},
+      )
+
+    queue.enqueue(listOf(a))
+    runCurrent()
+
+    assertEquals(listOf("a.txt", "b.txt"), sent)
+    assertEquals(false, queue.state.value.isActive)
+  }
+
+  /** An enqueue racing the moment the worker finishes must start a new worker or be picked up, never be stranded */
+  @Test
+  fun enqueueRacingTheDrainIsNeverStranded() {
+    val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    val sent = AtomicInteger()
+    val queue =
+      SendQueue(scope = scope, prepare = { it.fileName }, send = { _, _ -> sent.incrementAndGet() }, cleanup = {})
+    try {
+      runBlocking {
+        repeat(5_000) { i ->
+          queue.enqueue(listOf(item("a$i")))
+          repeat(i % 400) { Thread.onSpinWait() }
+          queue.enqueue(listOf(item("b$i")))
+          val deadline = System.nanoTime() + 5_000_000_000L
+          while (sent.get() < 2 * (i + 1) || queue.state.value.isActive) {
+            check(System.nanoTime() < deadline) { "queue stranded an item at run $i: ${queue.state.value}" }
+            Thread.yield()
+          }
+        }
+      }
+    } finally {
+      scope.cancel()
+    }
   }
 }

@@ -59,23 +59,37 @@ class SendQueue(
 
   private suspend fun drain() {
     while (true) {
-      val item =
+      // Taking the next item, or going idle, is one step under the lock: an
+      // enqueue either lands before it (and is taken here) or sees an idle queue
+      val step =
         synchronized(lock) {
           val s = _state.value
-          val next = s.waiting.firstOrNull() ?: return@synchronized null
-          _state.value = s.copy(current = next, waiting = s.waiting.drop(1))
-          next
-        } ?: break
-      val result = run(item)
-      synchronized(lock) { _state.value = _state.value.let { it.copy(results = it.results + result) } }
-    }
-    val finished =
-      synchronized(lock) {
-        val s = _state.value
-        _state.value = s.copy(current = null)
-        s.results
+          val next = s.waiting.firstOrNull()
+          if (next == null) {
+            _state.value = s.copy(current = null)
+            Step.Done(s.results)
+          } else {
+            _state.value = s.copy(current = next, waiting = s.waiting.drop(1))
+            Step.Run(next)
+          }
+        }
+      when (step) {
+        is Step.Done -> {
+          _batches.emit(step.results)
+          return
+        }
+        is Step.Run -> {
+          val result = run(step.item)
+          synchronized(lock) { _state.value = _state.value.let { it.copy(results = it.results + result) } }
+        }
       }
-    _batches.emit(finished)
+    }
+  }
+
+  private sealed interface Step {
+    class Run(val item: QueueItem) : Step
+
+    class Done(val results: List<ItemResult>) : Step
   }
 
   private suspend fun run(item: QueueItem): ItemResult {
