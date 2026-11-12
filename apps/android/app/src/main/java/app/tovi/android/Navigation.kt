@@ -95,23 +95,26 @@ fun MainNavigation(
     }
   }
 
-  // Registered here rather than in a screen, so a result delivered to a
-  // recreated activity (the app was killed while the picker was open) still lands
-  val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument(), viewModel::filePicked)
-
   val snackbar = remember { SnackbarHostState() }
   LaunchedEffect(Unit) { viewModel.notices.collect { snackbar.showSnackbar(it) } }
-
-  // Asked once, before the first pick is sent; a refusal never blocks the send
   val context = LocalContext.current
   val scope = rememberCoroutineScope()
-  val askNotifications =
-    rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-      val prefs = context.getSharedPreferences(UI_PREFS, Context.MODE_PRIVATE)
-      if (!granted && !prefs.getBoolean(KEY_HINT_SHOWN, false)) {
-        prefs.edit().putBoolean(KEY_HINT_SHOWN, true).apply()
+
+  // Registered here rather than in a screen, so a result delivered to a
+  // recreated activity (the app was killed while the picker was open) still lands
+  val pickFile =
+    rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+      viewModel.filePicked(uri)
+      // Back from the picker, so the hint is actually on screen; marked shown only now
+      if (uri != null && shouldShowNotificationHint(context)) {
+        context.getSharedPreferences(UI_PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_HINT_SHOWN, true).apply()
         scope.launch { snackbar.showSnackbar("Notifications are off, so TOVI can't show send progress") }
       }
+    }
+
+  // Asked once, before the first pick is sent; a refusal never blocks the send
+  val askNotifications =
+    rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
       pickFile.launch(arrayOf("*/*"))
     }
 
@@ -207,6 +210,15 @@ private fun shouldAskNotifications(context: Context): Boolean =
   Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
     ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED &&
     !context.getSharedPreferences(UI_PREFS, Context.MODE_PRIVATE).getBoolean(KEY_ASKED, false)
+
+/** Asked and refused, and not yet told about it */
+private fun shouldShowNotificationHint(context: Context): Boolean {
+  val prefs = context.getSharedPreferences(UI_PREFS, Context.MODE_PRIVATE)
+  return Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+    ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED &&
+    prefs.getBoolean(KEY_ASKED, false) &&
+    !prefs.getBoolean(KEY_HINT_SHOWN, false)
+}
 
 /** Switch tabs: the tab becomes the only entry, so Back leaves the app */
 private fun NavBackStack<NavKey>.showTab(tab: Tab) {

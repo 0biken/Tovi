@@ -39,11 +39,14 @@ class TransferService : Service() {
   private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
   private var observer: Job? = null
   private var updates: Job? = null
+  /** The newest start request delivered; stopping for an older one would cut off a pending start */
+  private var lastStartId = 0
   private lateinit var repository: NodeRepository
 
   override fun onBind(intent: Intent?): IBinder? = null
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+    lastStartId = startId
     repository = (application as ToviApp).repository
     ensureChannels(this)
     // Straight away: the system kills the app if this is late
@@ -83,8 +86,18 @@ class TransferService : Service() {
             delay(UPDATE_INTERVAL_MS) // at most two updates a second
           }
       }
-    repository.queue.first { !it.isActive }
-    stop()
+    while (true) {
+      repository.queue.first { !it.isActive }
+      // The queue may have started again since (a flip StateFlow can hide from the edge hook)
+      if (repository.queue.value.isActive) continue
+      break
+    }
+    updates?.cancel() // a late update would bring the notification back
+    // False when a newer start is still to be delivered: it calls startForeground
+    // again and starts a fresh observer, so this one just ends and the notification stays
+    if (stopSelfResult(lastStartId)) {
+      ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+    }
   }
 
   private fun currentSend(): ActiveTransfer? =
@@ -94,16 +107,12 @@ class TransferService : Service() {
     getSystemService(NotificationManager::class.java).notify(ID_PROGRESS, progressNotification(this, text))
   }
 
-  private fun stop() {
-    updates?.cancel() // a late update would bring the notification back
-    ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
-    stopSelf()
-  }
-
   /** The system's time limit for a dataSync service (Android 15+) */
   override fun onTimeout(startId: Int, fgsType: Int) {
     Log.w(TAG, "foreground service timed out")
-    stop()
+    updates?.cancel()
+    ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+    stopSelf()
   }
 
   override fun onDestroy() {
