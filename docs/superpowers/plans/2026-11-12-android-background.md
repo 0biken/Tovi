@@ -30,7 +30,7 @@
 - If `MdnsDiscovery::new()` fails, run without discovery (warning only).
 - Build gates:
   - Rust: `cargo fmt --all -- --check`; `cargo clippy --workspace --exclude tovi-desktop --all-targets --all-features -- -D warnings`; `cargo test --workspace --exclude tovi-desktop`.
-  - Android, from `apps/android` with `JAVA_HOME` set to the Microsoft OpenJDK 17 folder under `C:\Program Files\Microsoft\`: `./gradlew testDebugUnitTest` and `./gradlew assembleDebug`.
+  - Android, from `apps/android` with `JAVA_HOME="/c/Program Files/Microsoft/jdk-17.0.21.21-hotspot"`: `./gradlew testDebugUnitTest` and `./gradlew assembleDebug`.
 - The commit trailer is `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. Never stage the untracked `.mp4` or `media/`.
 
 ## Review Focus
