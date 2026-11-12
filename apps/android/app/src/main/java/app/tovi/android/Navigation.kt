@@ -201,12 +201,12 @@ fun MainNavigation(
   live.requests.firstOrNull()?.let { RequestDialog(it, onRespond = viewModel::respond) }
 }
 
-private const val UI_PREFS = "tovi_ui"
-private const val KEY_ASKED = "asked_notifications"
+internal const val UI_PREFS = "tovi_ui"
+internal const val KEY_ASKED = "asked_notifications"
 private const val KEY_HINT_SHOWN = "notification_hint_shown"
 
 /** Android 13+ needs the user's yes for notifications; ask only the first time */
-private fun shouldAskNotifications(context: Context): Boolean =
+internal fun shouldAskNotifications(context: Context): Boolean =
   Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
     ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED &&
     !context.getSharedPreferences(UI_PREFS, Context.MODE_PRIVATE).getBoolean(KEY_ASKED, false)
