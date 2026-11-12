@@ -216,6 +216,7 @@ class NodeRepository(private val context: Context, private val scope: CoroutineS
       deviceName = deviceName(),
       defaultReceiveDir = File(downloads, "TOVI").absolutePath,
       listen = null,
+      discovery = true,
     )
   }
 
