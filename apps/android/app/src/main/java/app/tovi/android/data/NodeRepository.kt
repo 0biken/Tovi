@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.provider.OpenableColumns
 import android.provider.Settings
 import android.util.Log
 import app.tovi.core.Device
@@ -18,6 +19,7 @@ import java.io.File
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
@@ -105,27 +107,50 @@ class NodeRepository(private val context: Context, private val scope: CoroutineS
     }
   }
 
+  private val sendQueue =
+    SendQueue(
+      scope = scope,
+      prepare = { item ->
+        withContext(Dispatchers.IO) { OutgoingFiles.copyToCache(context, Uri.parse(item.source)).absolutePath }
+      },
+      send = { deviceId, path ->
+        // Success and failure are also reported by TransferFinished events
+        call { it.sendFile(deviceId, path) }.getOrThrow()
+      },
+      cleanup = { path -> withContext(Dispatchers.IO + NonCancellable) { File(path).parentFile?.deleteRecursively() } },
+    )
+
+  /** What the send queue is doing right now */
+  val queue: StateFlow<QueueState> = sendQueue.state
+
+  /** The results of each run of the send queue, once it drains */
+  val batches: Flow<List<ItemResult>> = sendQueue.batches
+
   /**
-   * Send a document picked by the user. The core reads files by path, so the
-   * content is copied into the app's cache first and removed afterwards.
+   * Queue documents picked or shared by the user. The core reads files by
+   * path, so each is copied into the app's cache just before it is sent and
+   * removed afterwards.
    */
-  fun send(deviceId: String, uri: Uri) {
-    Log.i(TAG, "sending a picked file to ${deviceId.take(8)}")
+  fun send(deviceId: String, deviceName: String, uris: List<Uri>) {
+    Log.i(TAG, "queueing ${uris.size} file(s) for ${deviceId.take(8)}")
     scope.launch {
-      val copy =
-        withContext(Dispatchers.IO) { runCatching { OutgoingFiles.copyToCache(context, uri) } }
-          .getOrElse {
-            Log.w(TAG, "could not read $uri", it)
-            _notices.trySend("Could not read that file: ${it.message}")
-            return@launch
-          }
-      try {
-        // Success and failure are both reported by TransferFinished events
-        call { it.sendFile(deviceId, copy.absolutePath) }
-      } finally {
-        withContext(Dispatchers.IO) { copy.parentFile?.deleteRecursively() }
-      }
+      val items =
+        withContext(Dispatchers.IO) {
+          uris.map { QueueItem(deviceId, deviceName, it.toString(), displayName(it)) }
+        }
+      sendQueue.enqueue(items)
     }
+  }
+
+  private fun displayName(uri: Uri): String {
+    val name =
+      runCatching {
+          context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+            if (c.moveToFirst()) c.getString(0) else null
+          }
+        }
+        .getOrNull()
+    return OutgoingFiles.safeName(name ?: uri.lastPathSegment ?: "file")
   }
 
   fun forget(deviceId: String) {

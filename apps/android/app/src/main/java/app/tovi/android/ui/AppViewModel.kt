@@ -104,7 +104,10 @@ class AppViewModel(private val repository: NodeRepository, private val saved: Sa
     when {
       uri == null -> Unit
       deviceId == null -> Log.w("Tovi", "a file was picked but the device it was for was lost")
-      else -> repository.send(deviceId, uri)
+      else -> {
+        val name = repository.devices.value.firstOrNull { it.id == deviceId }?.name ?: deviceId.take(8)
+        repository.send(deviceId, name, listOf(uri))
+      }
     }
   }
 
