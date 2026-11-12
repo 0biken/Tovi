@@ -165,6 +165,8 @@ dependencies {
   // Arch Components
   implementation(libs.androidx.lifecycle.runtime.compose)
   implementation(libs.androidx.lifecycle.viewmodel.compose)
+  // Whether the app is on screen, for the whole process
+  implementation(libs.androidx.lifecycle.process)
 
   // Compose
   implementation(libs.androidx.compose.ui)

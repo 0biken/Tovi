@@ -7,6 +7,7 @@ import android.os.Environment
 import android.provider.OpenableColumns
 import android.provider.Settings
 import android.util.Log
+import app.tovi.android.service.TransferService
 import app.tovi.core.Device
 import app.tovi.core.EventListener
 import app.tovi.core.LocalId
@@ -26,6 +27,9 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -76,6 +80,14 @@ class NodeRepository(private val context: Context, private val scope: CoroutineS
   fun start() {
     scope.launch {
       for (event in events) handle(event)
+    }
+    // The service keeps the process alive for as long as the queue has work
+    scope.launch {
+      sendQueue.state
+        .map { it.isActive }
+        .distinctUntilChanged()
+        .filter { it }
+        .collect { TransferService.start(context) }
     }
     scope.launch(Dispatchers.IO) {
       try {
@@ -132,14 +144,15 @@ class NodeRepository(private val context: Context, private val scope: CoroutineS
    * removed afterwards.
    */
   fun send(deviceId: String, deviceName: String, uris: List<Uri>) {
+    scope.launch { sendNow(deviceId, deviceName, uris) }
+  }
+
+  /** [send], for a caller that must know the files are queued before it carries on */
+  suspend fun sendNow(deviceId: String, deviceName: String, uris: List<Uri>) {
     Log.i(TAG, "queueing ${uris.size} file(s) for ${deviceId.take(8)}")
-    scope.launch {
-      val items =
-        withContext(Dispatchers.IO) {
-          uris.map { QueueItem(deviceId, deviceName, it.toString(), displayName(it)) }
-        }
-      sendQueue.enqueue(items)
-    }
+    val items =
+      withContext(Dispatchers.IO) { uris.map { QueueItem(deviceId, deviceName, it.toString(), displayName(it)) } }
+    sendQueue.enqueue(items)
   }
 
   private fun displayName(uri: Uri): String {

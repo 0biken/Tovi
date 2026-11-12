@@ -1,5 +1,9 @@
 package app.tovi.android
 
+import android.Manifest
+import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.padding
@@ -22,7 +26,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
+import kotlinx.coroutines.launch
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -53,6 +61,9 @@ fun MainNavigation(
   /** A `tovi://pair/...` link the app was opened with, not yet shown */
   pairLink: String? = null,
   onPairLinkShown: () -> Unit = {},
+  /** A notification asked for the Transfers tab */
+  openTransfers: Boolean = false,
+  onTransfersOpened: () -> Unit = {},
   viewModel: AppViewModel = viewModel(factory = AppViewModel.Factory),
 ) {
   val backStack = rememberNavBackStack(Devices)
@@ -77,12 +88,32 @@ fun MainNavigation(
     }
   }
 
+  LaunchedEffect(openTransfers) {
+    if (openTransfers) {
+      backStack.showTab(Transfers)
+      onTransfersOpened()
+    }
+  }
+
   // Registered here rather than in a screen, so a result delivered to a
   // recreated activity (the app was killed while the picker was open) still lands
   val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument(), viewModel::filePicked)
 
   val snackbar = remember { SnackbarHostState() }
   LaunchedEffect(Unit) { viewModel.notices.collect { snackbar.showSnackbar(it) } }
+
+  // Asked once, before the first pick is sent; a refusal never blocks the send
+  val context = LocalContext.current
+  val scope = rememberCoroutineScope()
+  val askNotifications =
+    rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+      val prefs = context.getSharedPreferences(UI_PREFS, Context.MODE_PRIVATE)
+      if (!granted && !prefs.getBoolean(KEY_HINT_SHOWN, false)) {
+        prefs.edit().putBoolean(KEY_HINT_SHOWN, true).apply()
+        scope.launch { snackbar.showSnackbar("Notifications are off, so TOVI can't show send progress") }
+      }
+      pickFile.launch(arrayOf("*/*"))
+    }
 
   Scaffold(
     topBar = {
@@ -129,7 +160,12 @@ fun MainNavigation(
               },
               onSend = { deviceId ->
                 viewModel.startPicking(deviceId)
-                pickFile.launch(arrayOf("*/*"))
+                if (shouldAskNotifications(context)) {
+                  context.getSharedPreferences(UI_PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_ASKED, true).apply()
+                  askNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
+                } else {
+                  pickFile.launch(arrayOf("*/*"))
+                }
               },
               onForget = viewModel::forget,
             )
@@ -161,6 +197,16 @@ fun MainNavigation(
   // One request at a time, oldest first
   live.requests.firstOrNull()?.let { RequestDialog(it, onRespond = viewModel::respond) }
 }
+
+private const val UI_PREFS = "tovi_ui"
+private const val KEY_ASKED = "asked_notifications"
+private const val KEY_HINT_SHOWN = "notification_hint_shown"
+
+/** Android 13+ needs the user's yes for notifications; ask only the first time */
+private fun shouldAskNotifications(context: Context): Boolean =
+  Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+    ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED &&
+    !context.getSharedPreferences(UI_PREFS, Context.MODE_PRIVATE).getBoolean(KEY_ASKED, false)
 
 /** Switch tabs: the tab becomes the only entry, so Back leaves the app */
 private fun NavBackStack<NavKey>.showTab(tab: Tab) {
